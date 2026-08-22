@@ -1,0 +1,6 @@
+flask
+flask-sqlalchemy
+cryptography
+itsdangerous
+gunicorn
+psycopg2-binary
