@@ -44,6 +44,7 @@ from sqlalchemy.exc import IntegrityError
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+# On Render, set a permanent SECRET_KEY environment variable.\n# Also set a permanent AES_KEY so encrypted votes survive restarts.
 
 _database_url = os.environ.get("DATABASE_URL", "sqlite:///evoting.db")
 # Render/Heroku sometimes hand out postgres:// which SQLAlchemy 1.4+ rejects
@@ -83,15 +84,57 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
 MAIL_FROM = os.environ.get("MAIL_FROM", SMTP_USERNAME or "no-reply@nairobi-evoting.local")
 MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Nairobi County E-Voting")
+EMAIL_VERIFICATION_MAX_AGE_SECONDS = 86400  # 24 hours
+
+
+def send_email(to_email, subject, body):
+    """Send a plain-text email through the configured SMTP server."""
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = f"{MAIL_FROM_NAME} <{MAIL_FROM}>"
+    msg["To"] = to_email
+
+    if not (SMTP_HOST and SMTP_USERNAME and SMTP_PASSWORD):
+        print("=" * 78)
+        print("[EMAIL NOT SENT] SMTP is not configured.")
+        print("[EMAIL NOT SENT] Set SMTP_HOST, SMTP_USERNAME and SMTP_PASSWORD.")
+        print(f"[EMAIL NOT SENT] Intended recipient: {to_email}")
+        print("=" * 78)
+        return False
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            if SMTP_USE_TLS:
+                server.starttls()
+                server.ehlo()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.sendmail(MAIL_FROM, [to_email], msg.as_string())
+
+        print(f"[EMAIL SENT] Email sent to {to_email}")
+        return True
+
+    except Exception as exc:
+        print(f"[EMAIL ERROR] Failed to send email to {to_email}: {type(exc).__name__}: {exc}")
+        return False
+
+
+def send_email_verification_email(to_email, verification_url):
+    subject = "Verify your Nairobi County E-Voting email"
+    body = (
+        "Hello,\n\n"
+        "Thank you for registering on the Nairobi County E-Voting Platform.\n\n"
+        "Please verify your email address by opening this link:\n\n"
+        f"{verification_url}\n\n"
+        f"This verification link expires in "
+        f"{EMAIL_VERIFICATION_MAX_AGE_SECONDS // 3600} hours.\n\n"
+        "If you did not create this account, you can safely ignore this email.\n\n"
+        "— Nairobi County E-Voting Platform"
+    )
+    return send_email(to_email, subject, body)
 
 
 def send_password_reset_email(to_email, reset_url):
-    """
-    Sends the password reset link to the voter's email via SMTP.
-    Falls back to console logging only if SMTP is not configured or the
-    send fails, so local development still works without a mail server.
-    Returns True if the email was actually sent.
-    """
     subject = "Reset your Nairobi County E-Voting password"
     body = (
         "Hello,\n\n"
@@ -104,32 +147,8 @@ def send_password_reset_email(to_email, reset_url):
         "your password will remain unchanged.\n\n"
         "— Nairobi County E-Voting Platform"
     )
+    return send_email(to_email, subject, body)
 
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = f"{MAIL_FROM_NAME} <{MAIL_FROM}>"
-    msg["To"] = to_email
-
-    if not (SMTP_HOST and SMTP_USERNAME and SMTP_PASSWORD):
-        print("=" * 78)
-        print("[EMAIL NOT SENT] SMTP is not configured (SMTP_HOST / SMTP_USERNAME /")
-        print("SMTP_PASSWORD missing), so the reset link cannot be emailed.")
-        print(f"[EMAIL NOT SENT] Intended recipient: {to_email}")
-        print(f"[EMAIL NOT SENT] Reset link (for local testing only): {reset_url}")
-        print("=" * 78)
-        return False
-
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-            if SMTP_USE_TLS:
-                server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.sendmail(MAIL_FROM, [to_email], msg.as_string())
-        print(f"[EMAIL SENT] Password reset link emailed to {to_email}")
-        return True
-    except Exception as exc:
-        print(f"[EMAIL ERROR] Failed to send reset email to {to_email}: {exc}")
-        return False
 
 GENESIS_HASH = "0" * 64
 NATIONAL_ID_REGEX = re.compile(r"^\d{7,8}$")
@@ -157,6 +176,9 @@ class User(db.Model):
     national_id = db.Column(db.String(8), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     has_voted = db.Column(db.Boolean, default=False, nullable=False)
+    email_verified = db.Column(db.Boolean, default=False, nullable=False)
+    email_verification_token = db.Column(db.String(500), unique=True, nullable=True)
+    email_verification_expires_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def set_password(self, raw_password):
@@ -517,6 +539,7 @@ REGISTER_HTML = """
     <div class="card">
       <div class="card-body p-4">
         <h3 class="mb-3">Voter Registration</h3>
+        <p class="text-muted small">A verification link will be sent to your email address after registration.</p>
         <form method="POST" novalidate>
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="mb-3">
@@ -565,7 +588,8 @@ LOGIN_HTML = """
           </div>
           <button type="submit" class="btn btn-primary w-100">Login</button>
         </form>
-        <p class="mt-3 mb-0"><a href="{{ url_for('forgot_password') }}">Forgot password?</a></p>
+        <p class="mt-3 mb-1"><a href="{{ url_for('forgot_password') }}">Forgot password?</a></p>
+        <p class="mb-0"><a href="{{ url_for('resend_verification') }}">Resend verification email</a></p>
       </div>
     </div>
   </div>
@@ -756,11 +780,24 @@ def register():
             for e in errors:
                 flash(e, "danger")
             return render_template_string(
-                REGISTER_HTML, full_name=full_name, email=email, national_id=national_id
+                REGISTER_HTML,
+                full_name=full_name,
+                email=email,
+                national_id=national_id
             )
 
-        user = User(full_name=full_name, email=email, national_id=national_id)
+        verification_token = secrets.token_urlsafe(48)
+        user = User(
+            full_name=full_name,
+            email=email,
+            national_id=national_id,
+            email_verified=False,
+            email_verification_token=verification_token,
+            email_verification_expires_at=datetime.utcnow()
+            + timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE_SECONDS)
+        )
         user.set_password(password)
+
         try:
             db.session.add(user)
             db.session.commit()
@@ -768,13 +805,128 @@ def register():
             db.session.rollback()
             flash("Email or National ID already registered.", "danger")
             return render_template_string(
-                REGISTER_HTML, full_name=full_name, email=email, national_id=national_id
+                REGISTER_HTML,
+                full_name=full_name,
+                email=email,
+                national_id=national_id
             )
 
-        flash("Registration successful. You may now log in.", "success")
+        verification_url = url_for(
+            "verify_email",
+            token=verification_token,
+            _external=True
+        )
+
+        if send_email_verification_email(user.email, verification_url):
+            flash(
+                "Registration successful. Please check your email and click the "
+                "verification link before logging in.",
+                "success"
+            )
+        else:
+            # Keep the account unverified if the mail server is unavailable.
+            # This prevents an unverified account from being used.
+            flash(
+                "Your registration was created, but the verification email could "
+                "not be sent. Please use the resend verification option.",
+                "warning"
+            )
+
         return redirect(url_for("login"))
 
     return render_template_string(REGISTER_HTML)
+
+
+@app.route("/verify-email/<token>")
+def verify_email(token):
+    user = User.query.filter_by(email_verification_token=token).first()
+
+    if not user:
+        flash("This email verification link is invalid.", "danger")
+        return redirect(url_for("login"))
+
+    if user.email_verified:
+        flash("Your email address has already been verified. You may log in.", "info")
+        return redirect(url_for("login"))
+
+    if (
+        not user.email_verification_expires_at
+        or user.email_verification_expires_at < datetime.utcnow()
+    ):
+        flash(
+            "This email verification link has expired. Please request a new one.",
+            "danger"
+        )
+        return redirect(url_for("resend_verification"))
+
+    user.email_verified = True
+    user.email_verification_token = None
+    user.email_verification_expires_at = None
+    db.session.commit()
+
+    flash("Email verified successfully. You may now log in.", "success")
+    return redirect(url_for("login"))
+
+
+@app.route("/resend-verification", methods=["GET", "POST"])
+def resend_verification():
+    if request.method == "POST":
+        validate_csrf()
+        email = request.form.get("email", "").strip().lower()
+        user = User.query.filter_by(email=email).first()
+
+        if user and not user.email_verified:
+            token = secrets.token_urlsafe(48)
+            user.email_verification_token = token
+            user.email_verification_expires_at = (
+                datetime.utcnow()
+                + timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE_SECONDS)
+            )
+            db.session.commit()
+
+            verification_url = url_for(
+                "verify_email",
+                token=token,
+                _external=True
+            )
+            send_email_verification_email(user.email, verification_url)
+
+        # Generic response to avoid revealing whether an account exists.
+        flash(
+            "If an unverified account exists for that email, a new verification "
+            "link has been sent.",
+            "info"
+        )
+        return redirect(url_for("login"))
+
+    resend_html = """
+    {% extends "base.html" %}
+    {% block content %}
+    <div class="row justify-content-center">
+      <div class="col-md-5">
+        <div class="card">
+          <div class="card-body p-4">
+            <h3 class="mb-3">Resend Verification Email</h3>
+            <p class="text-muted small">
+              Enter the email address you used during registration.
+            </p>
+            <form method="POST">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <div class="mb-3">
+                <label class="form-label">Registered Email</label>
+                <input type="email" class="form-control" name="email" required autofocus>
+              </div>
+              <button type="submit" class="btn btn-primary w-100">
+                Resend Verification Link
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endblock %}
+    """
+    return render_template_string(resend_html)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -791,6 +943,14 @@ def login():
         if not user or not user.check_password(password):
             flash("Invalid credentials.", "danger")
             return render_template_string(LOGIN_HTML)
+
+        if not user.email_verified:
+            flash(
+                "Please verify your email address before logging in. "
+                "You can request a new verification link if needed.",
+                "warning"
+            )
+            return redirect(url_for("resend_verification"))
 
         session.clear()
         session["user_id"] = user.id
@@ -821,18 +981,29 @@ def forgot_password():
         user = User.query.filter_by(email=email).first()
 
         if user:
-            token = serializer.dumps(user.email, salt=RESET_SALT)
+            token = serializer.dumps(
+                {"email": user.email, "nonce": secrets.token_urlsafe(16)},
+                salt=RESET_SALT
+            )
             expires_at = datetime.utcnow() + timedelta(seconds=RESET_TOKEN_MAX_AGE_SECONDS)
 
-            # Invalidate any previous outstanding tokens for this user
-            PasswordResetToken.query.filter_by(user_id=user.id, used=False).update({"used": True})
+            # Invalidate any previous outstanding tokens for this user.
+            PasswordResetToken.query.filter_by(
+                user_id=user.id, used=False
+            ).update({"used": True})
 
             db.session.add(PasswordResetToken(
-                user_id=user.id, token=token, expires_at=expires_at
+                user_id=user.id,
+                token=token,
+                expires_at=expires_at
             ))
             db.session.commit()
 
-            reset_url = url_for("reset_password", token=token, _external=True)
+            reset_url = url_for(
+                "reset_password",
+                token=token,
+                _external=True
+            )
             send_password_reset_email(user.email, reset_url)
 
         # Always show the same generic message to prevent user enumeration
@@ -849,7 +1020,14 @@ def forgot_password():
 @app.route("/reset-password/<token>", methods=["GET", "POST"])
 def reset_password(token):
     try:
-        email = serializer.loads(token, salt=RESET_SALT, max_age=RESET_TOKEN_MAX_AGE_SECONDS)
+        token_data = serializer.loads(
+            token,
+            salt=RESET_SALT,
+            max_age=RESET_TOKEN_MAX_AGE_SECONDS
+        )
+        email = token_data.get("email") if isinstance(token_data, dict) else token_data
+        if not isinstance(email, str):
+            raise BadSignature("Invalid token payload")
     except SignatureExpired:
         flash("This reset link has expired. Please request a new one.", "danger")
         return redirect(url_for("forgot_password"))
@@ -1007,5 +1185,5 @@ def results():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    debug = os.environ.get("FLASK_DEBUG", "true").lower() == "true"
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     app.run(host="0.0.0.0", port=port, debug=debug)
