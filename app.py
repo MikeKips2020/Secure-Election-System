@@ -22,8 +22,8 @@ import re
 import json
 import hashlib
 import secrets
-import smtplib
-from email.mime.text import MIMEText
+import urllib.request
+import urllib.error
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -36,6 +36,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet, InvalidToken
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from jinja2 import DictLoader
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 
 # ----------------------------------------------------------------------------
@@ -44,7 +45,6 @@ from sqlalchemy.exc import IntegrityError
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
-# On Render, set a permanent SECRET_KEY environment variable.\n# Also set a permanent AES_KEY so encrypted votes survive restarts.
 
 _database_url = os.environ.get("DATABASE_URL", "sqlite:///evoting.db")
 # Render/Heroku sometimes hand out postgres:// which SQLAlchemy 1.4+ rejects
@@ -76,78 +76,88 @@ serializer = URLSafeTimedSerializer(app.secret_key)
 RESET_SALT = "password-reset-salt"
 RESET_TOKEN_MAX_AGE_SECONDS = 900  # 15 minutes
 
-# --- Outbound email (SMTP) configuration ------------------------------------
-SMTP_HOST = os.environ.get("SMTP_HOST")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USERNAME = os.environ.get("SMTP_USERNAME")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
-SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
-MAIL_FROM = os.environ.get("MAIL_FROM", SMTP_USERNAME or "no-reply@nairobi-evoting.local")
+# --- Email API configuration --------------------------------------------------
+# Render Free web services block outbound SMTP ports 25, 465 and 587, so this
+# application uses the Resend HTTPS API instead of SMTP.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+MAIL_FROM = os.environ.get("MAIL_FROM", "onboarding@resend.dev")
 MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Nairobi County E-Voting")
 EMAIL_VERIFICATION_MAX_AGE_SECONDS = 86400  # 24 hours
 
 
-def send_email(to_email, subject, body):
-    """Send a plain-text email through the configured SMTP server."""
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = f"{MAIL_FROM_NAME} <{MAIL_FROM}>"
-    msg["To"] = to_email
+def send_email(to_email, subject, html_body, tag):
+    """Send an email through the Resend HTTPS API.
 
-    if not (SMTP_HOST and SMTP_USERNAME and SMTP_PASSWORD):
-        print("=" * 78)
-        print("[EMAIL NOT SENT] SMTP is not configured.")
-        print("[EMAIL NOT SENT] Set SMTP_HOST, SMTP_USERNAME and SMTP_PASSWORD.")
+    HTTPS works from Render Free because it does not use the blocked SMTP
+    ports. No extra Python email package is required.
+    """
+    if not RESEND_API_KEY:
+        print("[EMAIL NOT SENT] RESEND_API_KEY is not configured.")
         print(f"[EMAIL NOT SENT] Intended recipient: {to_email}")
-        print("=" * 78)
         return False
 
+    payload = json.dumps({
+        "from": f"{MAIL_FROM_NAME} <{MAIL_FROM}>",
+        "to": [to_email],
+        "subject": subject,
+        "html": html_body,
+        "tags": [{"name": "category", "value": tag}],
+    }).encode("utf-8")
+
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+            "User-Agent": "Nairobi-County-EVoting/1.0",
+        },
+        method="POST",
+    )
+
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.ehlo()
-            if SMTP_USE_TLS:
-                server.starttls()
-                server.ehlo()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.sendmail(MAIL_FROM, [to_email], msg.as_string())
-
-        print(f"[EMAIL SENT] Email sent to {to_email}")
-        return True
-
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response_body = response.read().decode("utf-8")
+            print(f"[EMAIL SENT] {tag} email sent to {to_email}: {response_body}")
+            return 200 <= response.status < 300
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        print(f"[EMAIL ERROR] Resend HTTP {exc.code}: {details}")
+        return False
     except Exception as exc:
-        print(f"[EMAIL ERROR] Failed to send email to {to_email}: {type(exc).__name__}: {exc}")
+        print(f"[EMAIL ERROR] Failed to send {tag} email to {to_email}: {type(exc).__name__}: {exc}")
         return False
 
 
 def send_email_verification_email(to_email, verification_url):
     subject = "Verify your Nairobi County E-Voting email"
-    body = (
-        "Hello,\n\n"
-        "Thank you for registering on the Nairobi County E-Voting Platform.\n\n"
-        "Please verify your email address by opening this link:\n\n"
-        f"{verification_url}\n\n"
-        f"This verification link expires in "
-        f"{EMAIL_VERIFICATION_MAX_AGE_SECONDS // 3600} hours.\n\n"
-        "If you did not create this account, you can safely ignore this email.\n\n"
-        "— Nairobi County E-Voting Platform"
-    )
-    return send_email(to_email, subject, body)
+    html = f"""
+    <html><body>
+      <h2>Verify your email address</h2>
+      <p>Thank you for registering on the Nairobi County E-Voting Platform.</p>
+      <p>Please click the button below to verify your email address:</p>
+      <p><a href="{verification_url}" style="display:inline-block;padding:12px 18px;background:#0c8a5f;color:white;text-decoration:none;border-radius:6px;">Verify Email Address</a></p>
+      <p>This link expires in 24 hours.</p>
+      <p>If you did not create this account, you can safely ignore this email.</p>
+      <p>— Nairobi County E-Voting Platform</p>
+    </body></html>
+    """
+    return send_email(to_email, subject, html, "email_verification")
 
 
 def send_password_reset_email(to_email, reset_url):
     subject = "Reset your Nairobi County E-Voting password"
-    body = (
-        "Hello,\n\n"
-        "We received a request to reset the password for your Nairobi County "
-        "E-Voting account.\n\n"
-        f"Reset your password using this link (expires in "
-        f"{RESET_TOKEN_MAX_AGE_SECONDS // 60} minutes, and can only be used once):\n\n"
-        f"{reset_url}\n\n"
-        "If you did not request this, you can safely ignore this email — "
-        "your password will remain unchanged.\n\n"
-        "— Nairobi County E-Voting Platform"
-    )
-    return send_email(to_email, subject, body)
+    html = f"""
+    <html><body>
+      <h2>Password reset request</h2>
+      <p>We received a request to reset the password for your Nairobi County E-Voting account.</p>
+      <p><a href="{reset_url}" style="display:inline-block;padding:12px 18px;background:#0c8a5f;color:white;text-decoration:none;border-radius:6px;">Reset Password</a></p>
+      <p>This link expires in 15 minutes and can only be used once.</p>
+      <p>If you did not request this, you can safely ignore this email.</p>
+      <p>— Nairobi County E-Voting Platform</p>
+    </body></html>
+    """
+    return send_email(to_email, subject, html, "password_reset")
 
 
 GENESIS_HASH = "0" * 64
@@ -267,6 +277,57 @@ def validate_csrf():
 app.jinja_env.globals["csrf_token"] = generate_csrf_token
 
 
+def migrate_database():
+    """Safely add email-verification fields to an existing database.
+
+    This runs automatically when the app starts, so a Render Free service does
+    not need the paid Pre-Deploy Command feature. Existing users are marked as
+    verified only when the email_verified column is being introduced; new users
+    are created as unverified and must verify their email.
+    """
+    inspector = inspect(db.engine)
+    tables = inspector.get_table_names()
+
+    if "users" not in tables:
+        # db.create_all() below will create the complete current schema.
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("users")}
+    email_verified_was_added = False
+
+    with db.engine.begin() as connection:
+        if "email_verified" not in existing_columns:
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT FALSE"
+            ))
+            email_verified_was_added = True
+
+        if "email_verification_token" not in existing_columns:
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN email_verification_token VARCHAR(500)"
+            ))
+
+        if "email_verification_expires_at" not in existing_columns:
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN email_verification_expires_at TIMESTAMP"
+            ))
+
+        connection.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email_verification_token
+            ON users (email_verification_token)
+        """))
+
+        # Existing accounts were registered before email verification existed.
+        # Keep those accounts usable; only newly registered accounts require
+        # verification. This runs only on the first introduction of the field.
+        if email_verified_was_added:
+            connection.execute(text(
+                "UPDATE users SET email_verified = TRUE WHERE email_verified = FALSE"
+            ))
+
+    print("[INFO] Automatic database migration for email verification completed.")
+
+
 def seed_candidates():
     if Candidate.query.count() == 0:
         for name, party, abbr in CANDIDATE_SEED:
@@ -276,6 +337,7 @@ def seed_candidates():
 
 
 with app.app_context():
+    migrate_database()
     db.create_all()
     seed_candidates()
 
@@ -539,7 +601,7 @@ REGISTER_HTML = """
     <div class="card">
       <div class="card-body p-4">
         <h3 class="mb-3">Voter Registration</h3>
-        <p class="text-muted small">A verification link will be sent to your email address after registration.</p>
+        <p class="text-muted small">A verification link will be sent to your email after registration.</p>
         <form method="POST" novalidate>
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="mb-3">
@@ -780,10 +842,7 @@ def register():
             for e in errors:
                 flash(e, "danger")
             return render_template_string(
-                REGISTER_HTML,
-                full_name=full_name,
-                email=email,
-                national_id=national_id
+                REGISTER_HTML, full_name=full_name, email=email, national_id=national_id
             )
 
         verification_token = secrets.token_urlsafe(48)
@@ -793,8 +852,9 @@ def register():
             national_id=national_id,
             email_verified=False,
             email_verification_token=verification_token,
-            email_verification_expires_at=datetime.utcnow()
-            + timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE_SECONDS)
+            email_verification_expires_at=(
+                datetime.utcnow() + timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE_SECONDS)
+            ),
         )
         user.set_password(password)
 
@@ -805,31 +865,24 @@ def register():
             db.session.rollback()
             flash("Email or National ID already registered.", "danger")
             return render_template_string(
-                REGISTER_HTML,
-                full_name=full_name,
-                email=email,
-                national_id=national_id
+                REGISTER_HTML, full_name=full_name, email=email, national_id=national_id
             )
 
         verification_url = url_for(
-            "verify_email",
-            token=verification_token,
-            _external=True
+            "verify_email", token=verification_token, _external=True
         )
 
         if send_email_verification_email(user.email, verification_url):
             flash(
                 "Registration successful. Please check your email and click the "
                 "verification link before logging in.",
-                "success"
+                "success",
             )
         else:
-            # Keep the account unverified if the mail server is unavailable.
-            # This prevents an unverified account from being used.
             flash(
-                "Your registration was created, but the verification email could "
-                "not be sent. Please use the resend verification option.",
-                "warning"
+                "Registration was created, but the verification email could not be "
+                "sent. Please use the resend verification option.",
+                "warning",
             )
 
         return redirect(url_for("login"))
@@ -853,10 +906,7 @@ def verify_email(token):
         not user.email_verification_expires_at
         or user.email_verification_expires_at < datetime.utcnow()
     ):
-        flash(
-            "This email verification link has expired. Please request a new one.",
-            "danger"
-        )
+        flash("This email verification link has expired. Please request a new one.", "danger")
         return redirect(url_for("resend_verification"))
 
     user.email_verified = True
@@ -879,23 +929,19 @@ def resend_verification():
             token = secrets.token_urlsafe(48)
             user.email_verification_token = token
             user.email_verification_expires_at = (
-                datetime.utcnow()
-                + timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE_SECONDS)
+                datetime.utcnow() + timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE_SECONDS)
             )
             db.session.commit()
 
             verification_url = url_for(
-                "verify_email",
-                token=token,
-                _external=True
+                "verify_email", token=token, _external=True
             )
             send_email_verification_email(user.email, verification_url)
 
-        # Generic response to avoid revealing whether an account exists.
         flash(
-            "If an unverified account exists for that email, a new verification "
-            "link has been sent.",
-            "info"
+            "If an unverified account exists for that email, a new verification link "
+            "has been sent.",
+            "info",
         )
         return redirect(url_for("login"))
 
@@ -907,18 +953,14 @@ def resend_verification():
         <div class="card">
           <div class="card-body p-4">
             <h3 class="mb-3">Resend Verification Email</h3>
-            <p class="text-muted small">
-              Enter the email address you used during registration.
-            </p>
+            <p class="text-muted small">Enter the email address used during registration.</p>
             <form method="POST">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <div class="mb-3">
                 <label class="form-label">Registered Email</label>
                 <input type="email" class="form-control" name="email" required autofocus>
               </div>
-              <button type="submit" class="btn btn-primary w-100">
-                Resend Verification Link
-              </button>
+              <button type="submit" class="btn btn-primary w-100">Resend Verification Link</button>
             </form>
           </div>
         </div>
@@ -948,7 +990,7 @@ def login():
             flash(
                 "Please verify your email address before logging in. "
                 "You can request a new verification link if needed.",
-                "warning"
+                "warning",
             )
             return redirect(url_for("resend_verification"))
 
@@ -983,27 +1025,19 @@ def forgot_password():
         if user:
             token = serializer.dumps(
                 {"email": user.email, "nonce": secrets.token_urlsafe(16)},
-                salt=RESET_SALT
+                salt=RESET_SALT,
             )
             expires_at = datetime.utcnow() + timedelta(seconds=RESET_TOKEN_MAX_AGE_SECONDS)
 
-            # Invalidate any previous outstanding tokens for this user.
-            PasswordResetToken.query.filter_by(
-                user_id=user.id, used=False
-            ).update({"used": True})
+            # Invalidate any previous outstanding tokens for this user
+            PasswordResetToken.query.filter_by(user_id=user.id, used=False).update({"used": True})
 
             db.session.add(PasswordResetToken(
-                user_id=user.id,
-                token=token,
-                expires_at=expires_at
+                user_id=user.id, token=token, expires_at=expires_at
             ))
             db.session.commit()
 
-            reset_url = url_for(
-                "reset_password",
-                token=token,
-                _external=True
-            )
+            reset_url = url_for("reset_password", token=token, _external=True)
             send_password_reset_email(user.email, reset_url)
 
         # Always show the same generic message to prevent user enumeration
@@ -1021,9 +1055,7 @@ def forgot_password():
 def reset_password(token):
     try:
         token_data = serializer.loads(
-            token,
-            salt=RESET_SALT,
-            max_age=RESET_TOKEN_MAX_AGE_SECONDS
+            token, salt=RESET_SALT, max_age=RESET_TOKEN_MAX_AGE_SECONDS
         )
         email = token_data.get("email") if isinstance(token_data, dict) else token_data
         if not isinstance(email, str):
