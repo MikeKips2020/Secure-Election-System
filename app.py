@@ -749,23 +749,54 @@ RESULTS_HTML = """
   <div class="card-body p-4">
     <h3 class="mb-3">Audit &amp; Results Dashboard</h3>
     <p>
-      Hash Chain Integrity Status:
-      {% if chain_valid %}
+      Audit Status:
+      {% if audit_status == 'VALID' %}
         <span class="badge badge-valid">VALID</span>
+      {% elif audit_status == 'VALID_WITH_SPOILT' %}
+        <span class="badge bg-warning text-dark">VALID CHAIN — SPOILT BALLOTS PRESENT</span>
       {% else %}
-        <span class="badge badge-compromised">COMPROMISED</span>
+        <span class="badge badge-compromised">HASH CHAIN COMPROMISED</span>
       {% endif %}
     </p>
-    <p class="text-muted small mb-0">
-      Total votes recorded: {{ total_votes }} &mdash;
-      Verified before {{ 'a break was detected' if not chain_valid else 'reaching the end of the ledger' }}: {{ verified_count }}
+
+    <p class="text-muted small mb-1">
+      Total ballots recorded: {{ total_votes }} &mdash;
+      Ledger records integrity-verified: {{ integrity_verified_count }}
     </p>
-    {% if not chain_valid %}
+    <p class="text-muted small mb-0">
+      Valid votes counted: <strong>{{ valid_vote_count }}</strong> &mdash;
+      Spoilt / invalid votes: <strong>{{ spoilt_votes }}</strong>
+    </p>
+
+    {% if audit_status == 'HASH_COMPROMISED' %}
     <div class="alert alert-danger mt-3 mb-0">
-      Tampering detected at vote ID <strong>{{ break_point }}</strong>. Tally below only reflects
-      votes verified up to that point.
+      <strong>Hash-chain integrity failure at vote ID {{ break_point }}.</strong>
+      The stored chain link or SHA-256 hash does not match the expected value.
+      Results include only records safely processed before this point.
+    </div>
+    {% elif spoilt_votes > 0 %}
+    <div class="alert alert-warning mt-3 mb-0">
+      <strong>{{ spoilt_votes }} spoilt / invalid ballot{{ '' if spoilt_votes == 1 else 's' }} detected.</strong>
+      These ballots are excluded from candidate totals but shown as one result category.
+      {% if decryption_error_count > 0 %}
+        Decryption/authentication errors: {{ decryption_error_count }}.
+      {% endif %}
+      {% if ballot_data_error_count > 0 %}
+        Malformed/unknown-candidate ballot errors: {{ ballot_data_error_count }}.
+      {% endif %}
     </div>
     {% endif %}
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-body p-4">
+    <h4 class="mb-2">Vote Distribution</h4>
+    <p class="text-muted small">Valid candidate votes plus any spoilt / invalid ballots recorded during the audit.</p>
+    <div style="position:relative; max-width:620px; height:360px; margin:0 auto;">
+      <canvas id="votePieChart" aria-label="Pie chart showing votes by candidate and spoilt ballots" role="img"></canvas>
+      <div id="noVotesMessage" class="text-center text-muted pt-5 d-none">No votes to display yet.</div>
+    </div>
   </div>
 </div>
 
@@ -774,7 +805,7 @@ RESULTS_HTML = """
     <h4 class="mb-3">Vote Tally</h4>
     <table class="table table-striped">
       <thead>
-        <tr><th>Candidate</th><th>Party</th><th>Votes</th></tr>
+        <tr><th>Candidate / Category</th><th>Party / Status</th><th>Votes</th></tr>
       </thead>
       <tbody>
         {% for c in candidates %}
@@ -784,10 +815,69 @@ RESULTS_HTML = """
           <td><strong>{{ tally.get(c.id, 0) }}</strong></td>
         </tr>
         {% endfor %}
+        <tr class="table-warning">
+          <td><strong>Spoilt / Invalid Votes</strong></td>
+          <td>Ballots that could not be validly counted</td>
+          <td><strong>{{ spoilt_votes }}</strong></td>
+        </tr>
       </tbody>
+      <tfoot>
+        <tr>
+          <th colspan="2">Total ballots recorded</th>
+          <th>{{ total_votes }}</th>
+        </tr>
+      </tfoot>
     </table>
   </div>
 </div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script>
+  const voteLabels = {{ chart_labels | tojson }};
+  const voteValues = {{ chart_values | tojson }};
+  const hasVotes = voteValues.some(value => value > 0);
+
+  if (hasVotes) {
+    const ctx = document.getElementById('votePieChart');
+    new Chart(ctx, {
+      type: 'pie',
+      data: {
+        labels: voteLabels,
+        datasets: [{
+          label: 'Votes',
+          data: voteValues,
+          backgroundColor: [
+            '#0c8a5f', '#d9a441', '#3c5170', '#b3423a',
+            '#6f42c1', '#6c757d', '#0dcaf0', '#fd7e14'
+          ],
+          borderColor: '#ffffff',
+          borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom' },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const values = context.dataset.data;
+                const total = values.reduce((sum, value) => sum + Number(value), 0);
+                const value = Number(context.raw);
+                const percentage = total ? ((value / total) * 100).toFixed(1) : '0.0';
+                return `${context.label}: ${value} vote${value === 1 ? '' : 's'} (${percentage}%)`;
+              }
+            }
+          }
+        }
+      }
+    });
+  } else {
+    document.getElementById('votePieChart').classList.add('d-none');
+    document.getElementById('noVotesMessage').classList.remove('d-none');
+  }
+</script>
 {% endblock %}
 """
 
@@ -1174,42 +1264,80 @@ def results():
 
     tally = {c.id: 0 for c in candidates}
     previous_hash = GENESIS_HASH
-    chain_valid = True
-    verified_count = 0
+    audit_status = "VALID"
+    integrity_verified_count = 0
+    valid_vote_count = 0
+    spoilt_votes = 0
+    decryption_error_count = 0
+    ballot_data_error_count = 0
     break_point = None
 
     for v in votes:
         expected_hash = compute_chain_hash(v.encrypted_vote, previous_hash)
 
+        # A chain mismatch is a ledger-integrity failure. Stop here because
+        # subsequent records can no longer be trusted as part of this chain.
         if v.previous_hash != previous_hash or v.current_hash != expected_hash:
-            chain_valid = False
+            audit_status = "HASH_COMPROMISED"
             break_point = v.id
             break
+
+        # At this point the ledger record itself is hash-chain verified.
+        integrity_verified_count += 1
 
         try:
             decrypted = fernet.decrypt(v.encrypted_vote.encode("utf-8"))
+        except InvalidToken:
+            # The stored record is still hash-chain intact, but the ballot cannot
+            # be authenticated/decrypted. Count it as one spoilt/invalid ballot
+            # and continue auditing the chain using the stored current_hash.
+            spoilt_votes += 1
+            decryption_error_count += 1
+            previous_hash = v.current_hash
+            continue
+
+        try:
             data = json.loads(decrypted.decode("utf-8"))
             cand_id = data.get("candidate_id")
-            if cand_id in tally:
-                tally[cand_id] += 1
-        except (InvalidToken, ValueError, json.JSONDecodeError):
-            chain_valid = False
-            break_point = v.id
-            break
+            if cand_id not in tally:
+                raise ValueError("Ballot references an unknown candidate")
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            # The ciphertext decrypted, but the ballot contents are malformed or
+            # reference an invalid candidate. Treat it as a spoilt ballot.
+            spoilt_votes += 1
+            ballot_data_error_count += 1
+            previous_hash = v.current_hash
+            continue
 
-        verified_count += 1
+        tally[cand_id] += 1
+        valid_vote_count += 1
         previous_hash = v.current_hash
+
+    if audit_status == "VALID" and spoilt_votes > 0:
+        audit_status = "VALID_WITH_SPOILT"
+
+    chart_labels = [f"{c.name} ({c.abbreviation})" for c in candidates]
+    chart_values = [tally.get(c.id, 0) for c in candidates]
+
+    # Show all ballot-level problems as one result category in the pie chart.
+    chart_labels.append("Spoilt / Invalid Votes")
+    chart_values.append(spoilt_votes)
 
     return render_template_string(
         RESULTS_HTML,
         candidates=candidates,
         tally=tally,
-        chain_valid=chain_valid,
+        audit_status=audit_status,
         total_votes=len(votes),
-        verified_count=verified_count,
+        integrity_verified_count=integrity_verified_count,
+        valid_vote_count=valid_vote_count,
+        spoilt_votes=spoilt_votes,
+        decryption_error_count=decryption_error_count,
+        ballot_data_error_count=ballot_data_error_count,
         break_point=break_point,
+        chart_labels=chart_labels,
+        chart_values=chart_values,
     )
-
 
 # ----------------------------------------------------------------------------
 # Entrypoint
