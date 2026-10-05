@@ -164,6 +164,11 @@ GENESIS_HASH = "0" * 64
 NATIONAL_ID_REGEX = re.compile(r"^\d{7,8}$")
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+ELECTION_DEFAULT_TITLE = os.environ.get(
+    "ELECTION_TITLE", "Nairobi County Gubernatorial Election"
+)
+
 CANDIDATE_SEED = [
     ("Maina Kamau", "Alliance for Renewal and Progress", "ARP"),
     ("Amina Hussein", "Green Development Party", "GDP"),
@@ -189,6 +194,7 @@ class User(db.Model):
     email_verified = db.Column(db.Boolean, default=False, nullable=False)
     email_verification_token = db.Column(db.String(500), unique=True, nullable=True)
     email_verification_expires_at = db.Column(db.DateTime, nullable=True)
+    role = db.Column(db.String(20), default="voter", nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def set_password(self, raw_password):
@@ -214,7 +220,31 @@ class Vote(db.Model):
     encrypted_vote = db.Column(db.Text, nullable=False)
     previous_hash = db.Column(db.String(64), nullable=False)
     current_hash = db.Column(db.String(64), nullable=False)
+    key_version = db.Column(db.String(40), default="v1", nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class ElectionSetting(db.Model):
+    __tablename__ = "election_settings"
+
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False, default=ELECTION_DEFAULT_TITLE)
+    is_open = db.Column(db.Boolean, default=True, nullable=False)
+    results_visible = db.Column(db.Boolean, default=True, nullable=False)
+    opens_at = db.Column(db.DateTime, nullable=True)
+    closes_at = db.Column(db.DateTime, nullable=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AuditEvent(db.Model):
+    __tablename__ = "audit_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    event_type = db.Column(db.String(80), nullable=False, index=True)
+    severity = db.Column(db.String(20), nullable=False, default="INFO")
+    user_id = db.Column(db.Integer, nullable=True)
+    details = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
 class PasswordResetToken(db.Model):
@@ -247,6 +277,61 @@ def current_user():
     if not uid:
         return None
     return User.query.get(uid)
+
+
+def admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        user = current_user()
+        if not user:
+            flash("Please log in to continue.", "warning")
+            return redirect(url_for("login"))
+        if user.role != "admin":
+            log_event("UNAUTHORIZED_ADMIN_ACCESS", "WARNING", user.id,
+                      f"Attempted access to {request.path}")
+            flash("Administrator access is required.", "danger")
+            return redirect(url_for("home"))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def log_event(event_type, severity="INFO", user_id=None, details=None):
+    try:
+        db.session.add(AuditEvent(
+            event_type=event_type,
+            severity=severity,
+            user_id=user_id,
+            details=(details or "")[:2000]
+        ))
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        print(f"[AUDIT ERROR] {event_type}: {exc}")
+
+
+def get_election():
+    election = ElectionSetting.query.first()
+    if not election:
+        election = ElectionSetting(
+            title=ELECTION_DEFAULT_TITLE,
+            is_open=True,
+            results_visible=True
+        )
+        db.session.add(election)
+        db.session.commit()
+    return election
+
+
+def election_is_open(election=None):
+    election = election or get_election()
+    now = datetime.utcnow()
+    if not election.is_open:
+        return False
+    if election.opens_at and now < election.opens_at:
+        return False
+    if election.closes_at and now >= election.closes_at:
+        return False
+    return True
 
 
 def get_last_vote_hash():
@@ -312,6 +397,11 @@ def migrate_database():
                 "ALTER TABLE users ADD COLUMN email_verification_expires_at TIMESTAMP"
             ))
 
+        if "role" not in existing_columns:
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'voter'"
+            ))
+
         connection.execute(text("""
             CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email_verification_token
             ON users (email_verification_token)
@@ -325,7 +415,17 @@ def migrate_database():
                 "UPDATE users SET email_verified = TRUE WHERE email_verified = FALSE"
             ))
 
-    print("[INFO] Automatic database migration for email verification completed.")
+    # Version 2 vote schema upgrade.
+    inspector = inspect(db.engine)
+    if "votes" in inspector.get_table_names():
+        vote_columns = {column["name"] for column in inspector.get_columns("votes")}
+        if "key_version" not in vote_columns:
+            with db.engine.begin() as connection:
+                connection.execute(text(
+                    "ALTER TABLE votes ADD COLUMN key_version VARCHAR(40) NOT NULL DEFAULT 'legacy'"
+                ))
+
+    print("[INFO] Automatic database migration for Advanced Version 2 completed.")
 
 
 def seed_candidates():
@@ -340,6 +440,13 @@ with app.app_context():
     migrate_database()
     db.create_all()
     seed_candidates()
+    get_election()
+    if ADMIN_EMAIL:
+        admin_user = User.query.filter_by(email=ADMIN_EMAIL).first()
+        if admin_user and admin_user.role != "admin":
+            admin_user.role = "admin"
+            db.session.commit()
+            print(f"[INFO] Promoted {ADMIN_EMAIL} to administrator.")
 
 
 # ----------------------------------------------------------------------------
@@ -745,45 +852,84 @@ VOTE_HTML = """
 RESULTS_HTML = """
 {% extends "base.html" %}
 {% block content %}
+
+<div class="card mb-4 border-0 shadow-sm">
+  <div class="card-body p-4">
+    {% if election_open %}
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+        <div>
+          <h2 class="mb-2">🟢 ELECTION OPEN</h2>
+          <p class="lead mb-2">Voting is currently in progress.</p>
+          <p class="mb-1"><strong>{{ total_votes }}</strong> ballot{{ '' if total_votes == 1 else 's' }} received.</p>
+          {% if not is_admin %}
+            <p class="text-muted mb-0">
+              Candidate results are hidden while polls are open to avoid influencing voters.
+            </p>
+          {% else %}
+            <p class="text-muted mb-0">
+              Administrator view: system integrity information is available below.
+            </p>
+          {% endif %}
+        </div>
+        <span class="badge text-bg-success fs-6">OPEN</span>
+      </div>
+    {% else %}
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+        <div>
+          <h2 class="mb-2">🔴 ELECTION CLOSED</h2>
+          <p class="lead mb-2">Voting has ended.</p>
+          <p class="mb-1"><strong>{{ total_votes }}</strong> ballot{{ '' if total_votes == 1 else 's' }} recorded.</p>
+          <p class="mb-1">
+            <strong>{{ verified_count }}/{{ total_votes }}</strong> ballots integrity checked/countable before any detected failure.
+          </p>
+          <p class="mb-0">
+            Final audit:
+            {% if integrity_status == "VALID" %}
+              <span class="badge text-bg-success">VALID</span>
+            {% elif integrity_status == "HASH_FAILURE" %}
+              <span class="badge text-bg-danger">HASH-CHAIN FAILURE</span>
+            {% else %}
+              <span class="badge text-bg-warning">DECRYPTION/KEY ERROR</span>
+            {% endif %}
+          </p>
+        </div>
+        <span class="badge text-bg-secondary fs-6">CLOSED</span>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% if show_candidate_results %}
 <div class="card mb-4">
   <div class="card-body p-4">
-    <h3 class="mb-3">Audit &amp; Results Dashboard</h3>
-    <p>
-      Audit Status:
-      {% if audit_status == 'VALID' %}
-        <span class="badge badge-valid">VALID</span>
-      {% elif audit_status == 'VALID_WITH_SPOILT' %}
-        <span class="badge bg-warning text-dark">VALID CHAIN — SPOILT BALLOTS PRESENT</span>
-      {% else %}
-        <span class="badge badge-compromised">HASH CHAIN COMPROMISED</span>
-      {% endif %}
-    </p>
-
-    <p class="text-muted small mb-1">
-      Total ballots recorded: {{ total_votes }} &mdash;
-      Ledger records integrity-verified: {{ integrity_verified_count }}
-    </p>
-    <p class="text-muted small mb-0">
-      Valid votes counted: <strong>{{ valid_vote_count }}</strong> &mdash;
-      Spoilt / invalid votes: <strong>{{ spoilt_votes }}</strong>
-    </p>
-
-    {% if audit_status == 'HASH_COMPROMISED' %}
-    <div class="alert alert-danger mt-3 mb-0">
-      <strong>Hash-chain integrity failure at vote ID {{ break_point }}.</strong>
-      The stored chain link or SHA-256 hash does not match the expected value.
-      Results include only records safely processed before this point.
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div>
+        <h3 class="mb-1">Final Results</h3>
+        <div class="text-muted">{{ election.title }}</div>
+      </div>
+      <span class="badge {{ 'text-bg-success' if integrity_status == 'VALID' else 'text-bg-warning' }}">
+        Audit: {{ integrity_status.replace('_', ' ') }}
+      </span>
     </div>
-    {% elif spoilt_votes > 0 %}
+
+    <hr>
+    <div class="row g-3">
+      <div class="col-md-3"><strong>{{ registered_voters }}</strong><br><span class="text-muted">Registered voters</span></div>
+      <div class="col-md-3"><strong>{{ total_votes }}</strong><br><span class="text-muted">Ballots recorded</span></div>
+      <div class="col-md-3"><strong>{{ verified_count }}</strong><br><span class="text-muted">Valid/decrypted</span></div>
+      <div class="col-md-3"><strong>{{ "%.1f"|format(turnout) }}%</strong><br><span class="text-muted">Turnout</span></div>
+    </div>
+
+    {% if integrity_status == "HASH_FAILURE" %}
+    <div class="alert alert-danger mt-3 mb-0">
+      The stored hash chain failed at vote ID <strong>{{ break_point }}</strong>.
+      Candidate totals below only include ballots safely processed before that point.
+    </div>
+    {% elif integrity_status == "DECRYPTION_FAILURE" %}
     <div class="alert alert-warning mt-3 mb-0">
-      <strong>{{ spoilt_votes }} spoilt / invalid ballot{{ '' if spoilt_votes == 1 else 's' }} detected.</strong>
-      These ballots are excluded from candidate totals but shown as one result category.
-      {% if decryption_error_count > 0 %}
-        Decryption/authentication errors: {{ decryption_error_count }}.
-      {% endif %}
-      {% if ballot_data_error_count > 0 %}
-        Malformed/unknown-candidate ballot errors: {{ ballot_data_error_count }}.
-      {% endif %}
+      The hash chain is intact up to vote ID <strong>{{ break_point }}</strong>, but that ballot
+      could not be decrypted with the current encryption key. This is reported separately
+      from ledger tampering.
     </div>
     {% endif %}
   </div>
@@ -791,93 +937,126 @@ RESULTS_HTML = """
 
 <div class="card mb-4">
   <div class="card-body p-4">
-    <h4 class="mb-2">Vote Distribution</h4>
-    <p class="text-muted small">Valid candidate votes plus any spoilt / invalid ballots recorded during the audit.</p>
-    <div style="position:relative; max-width:620px; height:360px; margin:0 auto;">
-      <canvas id="votePieChart" aria-label="Pie chart showing votes by candidate and spoilt ballots" role="img"></canvas>
-      <div id="noVotesMessage" class="text-center text-muted pt-5 d-none">No votes to display yet.</div>
+    <h4>Vote Tally</h4>
+    {% set denom = verified_count if verified_count else 1 %}
+    {% for c in candidates %}
+      {% set n = tally.get(c.id, 0) %}
+      {% set pct = (100.0 * n / denom) %}
+      <div class="mb-3">
+        <div class="d-flex justify-content-between">
+          <span><strong>{{ c.name }}</strong> <span class="text-muted">({{ c.abbreviation }})</span></span>
+          <span>{{ n }} vote{{ '' if n == 1 else 's' }} — {{ "%.1f"|format(pct) }}%</span>
+        </div>
+        <div class="progress" role="progressbar" aria-valuenow="{{ pct }}" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar" style="width: {{ pct }}%"></div>
+        </div>
+      </div>
+    {% endfor %}
+    <div class="alert alert-secondary mb-0">
+      Spoilt / invalid / uncountable ballots: <strong>{{ invalid_ballots }}</strong>
     </div>
   </div>
 </div>
 
-<div class="card">
+{% elif election_open and is_admin %}
+<div class="card mb-4">
   <div class="card-body p-4">
-    <h4 class="mb-3">Vote Tally</h4>
-    <table class="table table-striped">
-      <thead>
-        <tr><th>Candidate / Category</th><th>Party / Status</th><th>Votes</th></tr>
-      </thead>
-      <tbody>
-        {% for c in candidates %}
-        <tr>
-          <td>{{ c.name }}</td>
-          <td>{{ c.party }} ({{ c.abbreviation }})</td>
-          <td><strong>{{ tally.get(c.id, 0) }}</strong></td>
-        </tr>
-        {% endfor %}
-        <tr class="table-warning">
-          <td><strong>Spoilt / Invalid Votes</strong></td>
-          <td>Ballots that could not be validly counted</td>
-          <td><strong>{{ spoilt_votes }}</strong></td>
-        </tr>
-      </tbody>
-      <tfoot>
-        <tr>
-          <th colspan="2">Total ballots recorded</th>
-          <th>{{ total_votes }}</th>
-        </tr>
-      </tfoot>
-    </table>
+    <h3>Administrator Integrity Monitor</h3>
+    <p class="text-muted">
+      Candidate totals remain suppressed while voting is open. This panel exposes operational
+      integrity information only.
+    </p>
+    <div class="row g-3">
+      <div class="col-md-4"><strong>{{ total_votes }}</strong><br><span class="text-muted">Ballots received</span></div>
+      <div class="col-md-4"><strong>{{ verified_count }}</strong><br><span class="text-muted">Ledger/decryption checks passed</span></div>
+      <div class="col-md-4">
+        <strong>{{ integrity_status.replace('_', ' ') }}</strong><br><span class="text-muted">Current audit status</span>
+      </div>
+    </div>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-<script>
-  const voteLabels = {{ chart_labels | tojson }};
-  const voteValues = {{ chart_values | tojson }};
-  const hasVotes = voteValues.some(value => value > 0);
+{% else %}
+<div class="card">
+  <div class="card-body p-4 text-center">
+    <h4>Results are not yet available</h4>
+    {% if election_open %}
+      <p class="mb-0 text-muted">
+        Final candidate results will be released after the election closes.
+      </p>
+    {% else %}
+      <p class="mb-0 text-muted">
+        The election has closed, but the administrator has not yet released the final results.
+      </p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 
-  if (hasVotes) {
-    const ctx = document.getElementById('votePieChart');
-    new Chart(ctx, {
-      type: 'pie',
-      data: {
-        labels: voteLabels,
-        datasets: [{
-          label: 'Votes',
-          data: voteValues,
-          backgroundColor: [
-            '#0c8a5f', '#d9a441', '#3c5170', '#b3423a',
-            '#6f42c1', '#6c757d', '#0dcaf0', '#fd7e14'
-          ],
-          borderColor: '#ffffff',
-          borderWidth: 2
-        }]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: { position: 'bottom' },
-          tooltip: {
-            callbacks: {
-              label: function(context) {
-                const values = context.dataset.data;
-                const total = values.reduce((sum, value) => sum + Number(value), 0);
-                const value = Number(context.raw);
-                const percentage = total ? ((value / total) * 100).toFixed(1) : '0.0';
-                return `${context.label}: ${value} vote${value === 1 ? '' : 's'} (${percentage}%)`;
-              }
-            }
-          }
-        }
-      }
-    });
-  } else {
-    document.getElementById('votePieChart').classList.add('d-none');
-    document.getElementById('noVotesMessage').classList.remove('d-none');
-  }
-</script>
+{% endblock %}
+"""
+
+ADMIN_HTML = """
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-4">
+  <div class="col-lg-7">
+    <div class="card">
+      <div class="card-body p-4">
+        <h3>Administrator Dashboard</h3>
+        <p class="text-muted">Election lifecycle and security controls.</p>
+        <form method="POST">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <div class="mb-3">
+            <label class="form-label">Election title</label>
+            <input class="form-control" name="title" value="{{ election.title }}" maxlength="200" required>
+          </div>
+          <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" name="is_open" id="is_open" {% if election.is_open %}checked{% endif %}>
+            <label class="form-check-label" for="is_open">Election enabled for voting</label>
+          </div>
+          <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" name="results_visible" id="results_visible" {% if election.results_visible %}checked{% endif %}>
+            <label class="form-check-label" for="results_visible">Release final candidate results after polls close</label>
+          </div>
+          <div class="alert alert-info py-2 small">
+            Candidate standings are automatically hidden from voters while the election is open,
+            even if final-results release is enabled.
+          </div>
+          <button class="btn btn-primary" type="submit">Save Election Settings</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-5">
+    <div class="card">
+      <div class="card-body p-4">
+        <h4>System Summary</h4>
+        <p class="mb-1">Registered voters: <strong>{{ registered_voters }}</strong></p>
+        <p class="mb-1">Votes recorded: <strong>{{ total_votes }}</strong></p>
+        <p class="mb-0">Current status: <strong>{{ 'OPEN' if election_open else 'CLOSED' }}</strong></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card mt-4">
+  <div class="card-body p-4">
+    <h4>Recent Security Audit Events</h4>
+    <div class="table-responsive">
+      <table class="table table-sm">
+        <thead><tr><th>Time</th><th>Event</th><th>Severity</th><th>User ID</th><th>Details</th></tr></thead>
+        <tbody>
+        {% for e in events %}
+          <tr><td>{{ e.created_at }}</td><td>{{ e.event_type }}</td><td>{{ e.severity }}</td><td>{{ e.user_id or '-' }}</td><td>{{ e.details or '' }}</td></tr>
+        {% else %}
+          <tr><td colspan="5" class="text-muted">No audit events recorded yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
 {% endblock %}
 """
 
@@ -890,6 +1069,7 @@ app.jinja_loader = DictLoader({
     "reset_password.html": RESET_PASSWORD_HTML,
     "vote.html": VOTE_HTML,
     "results.html": RESULTS_HTML,
+    "admin.html": ADMIN_HTML,
 })
 
 
@@ -1197,7 +1377,13 @@ def vote():
         session.clear()
         return redirect(url_for("login"))
 
+    election = get_election()
+    if not election_is_open(election):
+        flash("Voting is currently closed for this election.", "warning")
+        return redirect(url_for("results"))
+
     if user.has_voted:
+        log_event("DUPLICATE_VOTE_BLOCKED", "WARNING", user.id, "Duplicate voting attempt blocked")
         flash("You have already cast your vote. Duplicate voting is not permitted.", "warning")
         return redirect(url_for("results"))
 
@@ -1239,6 +1425,7 @@ def vote():
             encrypted_vote=encrypted_str,
             previous_hash=previous_hash,
             current_hash=current_hash,
+            key_version=os.environ.get("AES_KEY_VERSION", "v1"),
         )
 
         try:
@@ -1251,6 +1438,7 @@ def vote():
             return render_template_string(VOTE_HTML, candidates=candidates)
 
         session["has_voted"] = True
+        log_event("VOTE_CAST", "INFO", user.id, "Ballot encrypted and added to hash-chain ledger")
         flash("Your vote was encrypted, hash-chained, and recorded successfully.", "success")
         return redirect(url_for("results"))
 
@@ -1259,85 +1447,111 @@ def vote():
 
 @app.route("/results")
 def results():
+    election = get_election()
+    user = current_user()
+    is_admin = bool(user and user.role == "admin")
+
+    # Public users can always see election status and ballot count.
+    # Candidate standings are never exposed while polls are open.
     candidates = Candidate.query.order_by(Candidate.id).all()
     votes = Vote.query.order_by(Vote.id.asc()).all()
 
     tally = {c.id: 0 for c in candidates}
     previous_hash = GENESIS_HASH
-    audit_status = "VALID"
-    integrity_verified_count = 0
-    valid_vote_count = 0
-    spoilt_votes = 0
-    decryption_error_count = 0
-    ballot_data_error_count = 0
+    integrity_status = "VALID"
+    verified_count = 0
+    invalid_ballots = 0
     break_point = None
 
     for v in votes:
         expected_hash = compute_chain_hash(v.encrypted_vote, previous_hash)
 
-        # A chain mismatch is a ledger-integrity failure. Stop here because
-        # subsequent records can no longer be trusted as part of this chain.
         if v.previous_hash != previous_hash or v.current_hash != expected_hash:
-            audit_status = "HASH_COMPROMISED"
+            integrity_status = "HASH_FAILURE"
             break_point = v.id
+            invalid_ballots = len(votes) - verified_count
+            log_event("HASH_CHAIN_FAILURE", "CRITICAL", None, f"Ledger mismatch at vote ID {v.id}")
             break
-
-        # At this point the ledger record itself is hash-chain verified.
-        integrity_verified_count += 1
 
         try:
             decrypted = fernet.decrypt(v.encrypted_vote.encode("utf-8"))
-        except InvalidToken:
-            # The stored record is still hash-chain intact, but the ballot cannot
-            # be authenticated/decrypted. Count it as one spoilt/invalid ballot
-            # and continue auditing the chain using the stored current_hash.
-            spoilt_votes += 1
-            decryption_error_count += 1
-            previous_hash = v.current_hash
-            continue
-
-        try:
             data = json.loads(decrypted.decode("utf-8"))
             cand_id = data.get("candidate_id")
-            if cand_id not in tally:
-                raise ValueError("Ballot references an unknown candidate")
-        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-            # The ciphertext decrypted, but the ballot contents are malformed or
-            # reference an invalid candidate. Treat it as a spoilt ballot.
-            spoilt_votes += 1
-            ballot_data_error_count += 1
-            previous_hash = v.current_hash
-            continue
+            if cand_id in tally:
+                tally[cand_id] += 1
+            else:
+                invalid_ballots += 1
+        except (InvalidToken, ValueError, json.JSONDecodeError):
+            integrity_status = "DECRYPTION_FAILURE"
+            break_point = v.id
+            invalid_ballots = len(votes) - verified_count
+            log_event(
+                "BALLOT_DECRYPTION_FAILURE",
+                "ERROR",
+                None,
+                f"Vote ID {v.id}; key version={getattr(v, 'key_version', 'unknown')}"
+            )
+            break
 
-        tally[cand_id] += 1
-        valid_vote_count += 1
+        verified_count += 1
         previous_hash = v.current_hash
 
-    if audit_status == "VALID" and spoilt_votes > 0:
-        audit_status = "VALID_WITH_SPOILT"
-
-    chart_labels = [f"{c.name} ({c.abbreviation})" for c in candidates]
-    chart_values = [tally.get(c.id, 0) for c in candidates]
-
-    # Show all ballot-level problems as one result category in the pie chart.
-    chart_labels.append("Spoilt / Invalid Votes")
-    chart_values.append(spoilt_votes)
+    registered_voters = User.query.filter(User.role != "admin").count()
+    turnout = (100.0 * len(votes) / registered_voters) if registered_voters else 0.0
 
     return render_template_string(
         RESULTS_HTML,
         candidates=candidates,
         tally=tally,
-        audit_status=audit_status,
+        integrity_status=integrity_status,
         total_votes=len(votes),
-        integrity_verified_count=integrity_verified_count,
-        valid_vote_count=valid_vote_count,
-        spoilt_votes=spoilt_votes,
-        decryption_error_count=decryption_error_count,
-        ballot_data_error_count=ballot_data_error_count,
+        verified_count=verified_count,
+        invalid_ballots=invalid_ballots,
         break_point=break_point,
-        chart_labels=chart_labels,
-        chart_values=chart_values,
+        registered_voters=registered_voters,
+        turnout=turnout,
+        election=election,
+        election_open=election_is_open(election),
+        is_admin=is_admin,
+        show_candidate_results=(
+            (not election_is_open(election))
+            and election.results_visible
+        ),
     )
+
+
+@app.route("/admin", methods=["GET", "POST"])
+@admin_required
+def admin_dashboard():
+    election = get_election()
+    user = current_user()
+
+    if request.method == "POST":
+        validate_csrf()
+        title = request.form.get("title", "").strip()[:200]
+        election.title = title or ELECTION_DEFAULT_TITLE
+        election.is_open = request.form.get("is_open") == "on"
+        election.results_visible = request.form.get("results_visible") == "on"
+        db.session.commit()
+        log_event(
+            "ELECTION_SETTINGS_CHANGED",
+            "WARNING",
+            user.id,
+            f"is_open={election.is_open}; results_visible={election.results_visible}"
+        )
+        flash("Election settings updated.", "success")
+        return redirect(url_for("admin_dashboard"))
+
+    events = AuditEvent.query.order_by(AuditEvent.id.desc()).limit(50).all()
+    return render_template_string(
+        ADMIN_HTML,
+        election=election,
+        election_open=election_is_open(election),
+        registered_voters=User.query.filter(User.role != "admin").count(),
+        total_votes=Vote.query.count(),
+        events=events,
+    )
+
 
 # ----------------------------------------------------------------------------
 # Entrypoint
