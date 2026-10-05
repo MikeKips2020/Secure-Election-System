@@ -288,6 +288,12 @@ def current_user():
     return User.query.get(uid)
 
 
+# Expose the authenticated database user to every Jinja template.
+# The navbar therefore reads the current role from the database rather than
+# relying on a possibly stale role value in the browser session.
+app.jinja_env.globals["current_user"] = current_user
+
+
 def admin_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
@@ -535,7 +541,9 @@ BASE_HTML = """
     <div class="d-flex gap-2">
       <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('results') }}">Audit &amp; Results</a>
       {% if session.get('user_id') %}
-        {% if not session.get('has_voted') %}
+        {% if current_user() and current_user().role == 'admin' %}
+        <a class="btn btn-warning btn-sm" href="{{ url_for('admin_dashboard') }}">Admin</a>
+        {% elif not session.get('has_voted') %}
         <a class="btn btn-emerald btn-sm" href="{{ url_for('vote') }}">Cast Vote</a>
         {% endif %}
         <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('logout') }}">Logout ({{ session.get('user_name') }})</a>
