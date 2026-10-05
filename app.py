@@ -47,9 +47,18 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
 _database_url = os.environ.get("DATABASE_URL", "sqlite:///evoting.db")
-# Render/Heroku sometimes hand out postgres:// which SQLAlchemy 1.4+ rejects
+
+# Render may supply postgres:// or postgresql://.
+# requirements.txt installs psycopg2-binary, so explicitly tell SQLAlchemy
+# to use the psycopg2 driver rather than SQLAlchemy 2.1's psycopg default.
 if _database_url.startswith("postgres://"):
-    _database_url = _database_url.replace("postgres://", "postgresql://", 1)
+    _database_url = _database_url.replace(
+        "postgres://", "postgresql+psycopg2://", 1
+    )
+elif _database_url.startswith("postgresql://"):
+    _database_url = _database_url.replace(
+        "postgresql://", "postgresql+psycopg2://", 1
+    )
 
 app.config["SQLALCHEMY_DATABASE_URI"] = _database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
