@@ -20,6 +20,7 @@ and receipt-freeness, etc.). Do not use this to run a real election.
 import os
 import re
 import json
+import base64
 import hashlib
 import secrets
 import urllib.request
@@ -224,6 +225,8 @@ class Candidate(db.Model):
     abbreviation = db.Column(db.String(10), nullable=False)
     candidate_number = db.Column(db.String(20), nullable=True)
     manifesto = db.Column(db.Text, nullable=True)
+    photo_data = db.Column(db.Text, nullable=True)
+    party_symbol_data = db.Column(db.Text, nullable=True)
     status = db.Column(db.String(20), nullable=False, default="active")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -588,6 +591,10 @@ def migrate_database():
                 ))
             if "created_at" not in cols:
                 connection.execute(text("ALTER TABLE candidates ADD COLUMN created_at TIMESTAMP"))
+            if "photo_data" not in cols:
+                connection.execute(text("ALTER TABLE candidates ADD COLUMN photo_data TEXT"))
+            if "party_symbol_data" not in cols:
+                connection.execute(text("ALTER TABLE candidates ADD COLUMN party_symbol_data TEXT"))
 
     inspector = inspect(db.engine)
     if "election_settings" in inspector.get_table_names():
@@ -601,7 +608,7 @@ def migrate_database():
                 connection.execute(text("ALTER TABLE election_settings ADD COLUMN is_current BOOLEAN NOT NULL DEFAULT FALSE"))
                 connection.execute(text("UPDATE election_settings SET is_current = TRUE WHERE id = (SELECT MIN(id) FROM election_settings)"))
 
-    print("[INFO] Automatic database migration for Advanced Version 3.1.1 RC7 completed.")
+    print("[INFO] Automatic database migration for Advanced Version 3.1.1 RC9 completed.")
 
 
 
@@ -1315,7 +1322,7 @@ VOTE_HTML = """
 <div class="d-flex justify-content-between"><div><h4 class="mb-0">{{ row.contest.position }}</h4><small class="text-muted">{{ row.area }}</small></div>{% if row.cast %}<span class="badge text-bg-success align-self-start">VOTE RECORDED</span>{% endif %}</div>
 {% if row.cast %}<p class="mt-3 mb-0 text-muted">This contest is locked. Your candidate choice is not stored in the receipt.</p>
 {% elif not row.candidates %}<div class="alert alert-warning mt-3 mb-0">No active candidates have been registered for this contest.</div>
-{% else %}{% for c in row.candidates %}<div class="form-check border rounded p-3 mt-2"><input class="form-check-input" type="radio" name="contest_{{ row.contest.id }}" id="c{{row.contest.id}}_{{c.id}}" value="{{c.id}}"><label class="form-check-label w-100" for="c{{row.contest.id}}_{{c.id}}"><strong>{{c.name}}</strong><br><span class="text-muted">{{c.party}} ({{c.abbreviation}})</span></label></div>{% endfor %}{% endif %}
+{% else %}{% for c in row.candidates %}<div class="form-check border rounded p-3 mt-2"><div class="d-flex align-items-center gap-3"><input class="form-check-input ms-0" type="radio" name="contest_{{ row.contest.id }}" id="c{{row.contest.id}}_{{c.id}}" value="{{c.id}}">{% if c.photo_data %}<img src="{{c.photo_data}}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px">{% endif %}<label class="form-check-label flex-grow-1" for="c{{row.contest.id}}_{{c.id}}"><strong>{% if c.candidate_number %}No. {{c.candidate_number}} — {% endif %}{{c.name}}</strong><br><span class="text-muted">{{c.party}} ({{c.abbreviation}})</span></label>{% if c.party_symbol_data %}<img src="{{c.party_symbol_data}}" alt="" style="width:48px;height:48px;object-fit:contain;border:1px solid #ddd;border-radius:6px;padding:2px">{% endif %}</div></div>{% endfor %}{% endif %}
 </div></div>{% endfor %}
 {% if open_count %}<button class="btn btn-success w-100">Encrypt & Submit Selected Contest Votes</button><p class="small text-muted mt-2">You do not need to vote in every remaining contest in one visit.</p>{% endif %}
 </form></div></div></div></div>
@@ -1421,6 +1428,11 @@ CANDIDATES_HTML = """
 <style>
  .candidate-filter label,.candidate-form label{font-weight:600;color:#183a61}
  .candidate-filter .form-select,.candidate-form .form-control{background:#f5f9fd}
+ .candidate-card{border:1px solid #dfe7ef;border-radius:12px;padding:14px;margin-bottom:12px}
+ .candidate-photo{width:76px;height:76px;object-fit:cover;border-radius:10px;background:#eef3f8}
+ .party-symbol{width:52px;height:52px;object-fit:contain;border-radius:8px;background:white;border:1px solid #e2e8f0;padding:3px}
+ .preview-img{width:92px;height:92px;object-fit:cover;border-radius:10px;border:1px solid #dbe3eb;background:white}
+ .contest-banner{background:#edf6ff;border-left:4px solid #0d6efd;padding:12px 14px;border-radius:8px}
 </style>
 <div class="row g-4">
  <div class="col-lg-5"><div class="card"><div class="card-body p-4">
@@ -1431,40 +1443,56 @@ CANDIDATES_HTML = """
    <div class="mb-3" id="countyWrap"><label class="form-label">County</label><select id="county" class="form-select"></select></div>
    <div class="mb-3" id="constituencyWrap"><label class="form-label">Constituency</label><select id="constituency" class="form-select"></select></div>
    <div class="mb-3" id="wardWrap"><label class="form-label">Ward</label><select id="ward" class="form-select"></select></div>
-   <div class="small text-muted mb-3" id="selectedArea"></div>
+   <div class="contest-banner small mb-3" id="selectedArea">Select a position and electoral area.</div>
   </div>
-  <form method="POST" class="candidate-form" id="candidateForm">
+  <form method="POST" enctype="multipart/form-data" class="candidate-form" id="candidateForm">
    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="add"><input type="hidden" name="contest_id" id="contest_id">
    <div class="mb-3"><label class="form-label">Full name</label><input class="form-control" name="name" required></div>
    <div class="mb-3"><label class="form-label">Political party</label><input class="form-control" name="party" required></div>
-   <div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" required></div><div class="col"><label class="form-label">Candidate number</label><input class="form-control" name="candidate_number"></div></div>
+   <div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" maxlength="10" required></div><div class="col"><label class="form-label">Candidate number</label><input class="form-control" name="candidate_number"></div></div>
+   <div class="row g-3 mt-1">
+    <div class="col-md-6"><label class="form-label">Candidate photograph</label><input class="form-control" type="file" name="candidate_photo" id="candidate_photo" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"><div class="small text-muted mt-1">JPG, PNG or WebP; max 1 MB.</div><img id="candidatePreview" class="preview-img mt-2 d-none" alt="Candidate preview"></div>
+    <div class="col-md-6"><label class="form-label">Party symbol / logo</label><input class="form-control" type="file" name="party_symbol" id="party_symbol" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"><div class="small text-muted mt-1">JPG, PNG or WebP; max 1 MB.</div><img id="partyPreview" class="preview-img mt-2 d-none" alt="Party symbol preview"></div>
+   </div>
    <div class="my-3"><label class="form-label">Short manifesto/profile</label><textarea class="form-control" name="manifesto" rows="4"></textarea></div>
-   <button class="btn btn-primary" id="addCandidate">Add Candidate</button>
+   <button class="btn btn-primary" id="addCandidate" disabled>Add Candidate</button>
   </form>
  </div></div></div>
  <div class="col-lg-7"><div class="card"><div class="card-body p-4">
-  <h3>Registered Candidates</h3><h6 class="text-muted mb-3" id="candidateHeading">Select a contest</h6>
+  <div class="d-flex justify-content-between gap-3 flex-wrap"><div><h3>Registered Candidates</h3><h6 class="text-muted mb-3" id="candidateHeading">Select a contest</h6></div><div style="min-width:220px"><input id="candidateSearch" class="form-control" placeholder="Search candidates..."></div></div>
   <div id="candidateRows"><div class="text-muted">Choose a position and area to view candidates for that contest.</div></div>
-  <div class="alert alert-info small mt-3">Candidates are withdrawn rather than deleted, preserving existing ballot history. Only candidates for the selected contest are shown.</div>
+  <div class="alert alert-info small mt-3">Candidates are withdrawn rather than deleted, preserving ballot history. Editing changes profile details only; the candidate remains attached to the same contest.</div>
  </div></div></div>
 </div>
+
+<div class="modal fade" id="editCandidateModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+<form method="POST" enctype="multipart/form-data"><div class="modal-header"><h5 class="modal-title">Edit Candidate</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+<div class="modal-body"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="edit"><input type="hidden" name="candidate_id" id="edit_id">
+<div class="mb-2"><label class="form-label">Full name</label><input class="form-control" name="name" id="edit_name" required></div>
+<div class="mb-2"><label class="form-label">Political party</label><input class="form-control" name="party" id="edit_party" required></div>
+<div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" id="edit_abbr" required></div><div class="col"><label class="form-label">Candidate number</label><input class="form-control" name="candidate_number" id="edit_number"></div></div>
+<div class="mt-2"><label class="form-label">Short manifesto/profile</label><textarea class="form-control" name="manifesto" id="edit_manifesto" rows="3"></textarea></div>
+<div class="row g-2 mt-1"><div class="col"><label class="form-label">Replace candidate photo</label><input class="form-control" type="file" name="candidate_photo" accept=".jpg,.jpeg,.png,.webp"></div><div class="col"><label class="form-label">Replace party symbol</label><input class="form-control" type="file" name="party_symbol" accept=".jpg,.jpeg,.png,.webp"></div></div>
+</div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary">Save Changes</button></div></form>
+</div></div></div>
+
 <script>
-const contests={{ contest_data|tojson }};
-const counties={{ counties_data|tojson }};
-const constituencies={{ constituencies_data|tojson }};
-const wards={{ wards_data|tojson }};
-const candidateMap={{ candidate_data|tojson }};
-const csrf={{ csrf_token()|tojson }};
-const pos=document.getElementById('position'), county=document.getElementById('county'), con=document.getElementById('constituency'), ward=document.getElementById('ward');
-const cw=document.getElementById('countyWrap'), xw=document.getElementById('constituencyWrap'), ww=document.getElementById('wardWrap');
-function opts(el, rows, placeholder){el.innerHTML=''; if(placeholder){let o=new Option(placeholder,'');el.add(o)} rows.forEach(r=>el.add(new Option(r.name,r.id)));}
-function positions(){let seen=[]; contests.forEach(c=>{if(!seen.includes(c.position))seen.push(c.position)}); opts(pos,seen.map(x=>({id:x,name:x})));}
-function refreshGeo(){let p=pos.value, needCounty=p!='President', needCon=p=='Member of Parliament'||p=='Member of County Assembly', needWard=p=='Member of County Assembly'; cw.style.display=needCounty?'':'none';xw.style.display=needCon?'':'none';ww.style.display=needWard?'':'none'; if(needCounty && !county.options.length) opts(county,counties); refreshCon();}
-function refreshCon(){let rows=constituencies.filter(x=>String(x.county_id)==String(county.value)); opts(con,rows); refreshWard();}
-function refreshWard(){let rows=wards.filter(x=>String(x.constituency_id)==String(con.value)); opts(ward,rows); chooseContest();}
-function chooseContest(){let p=pos.value; let c=contests.find(x=>x.position==p && (p=='President'||String(x.county_id)==String(county.value)) && (!['Member of Parliament','Member of County Assembly'].includes(p)||String(x.constituency_id)==String(con.value)) && (p!='Member of County Assembly'||String(x.ward_id)==String(ward.value))); let id=c?c.id:''; document.getElementById('contest_id').value=id; document.getElementById('addCandidate').disabled=!id; let area=c?c.area:'No matching contest'; document.getElementById('selectedArea').textContent=c?('Selected contest: '+p+' — '+area):'No matching contest found.'; document.getElementById('candidateHeading').textContent=c?('Candidates for: '+p+' — '+area):'Select a contest'; let rows=c?(candidateMap[String(id)]||[]):[]; let box=document.getElementById('candidateRows'); if(!rows.length){box.innerHTML='<div class="text-muted">No candidates registered for this contest yet.</div>';return;} let h='<div class="table-responsive"><table class="table"><thead><tr><th>Candidate</th><th>Party</th><th>Status</th><th></th></tr></thead><tbody>'; rows.forEach(r=>{h+='<tr><td>'+esc(r.name)+'</td><td>'+esc(r.party)+' ('+esc(r.abbreviation)+')</td><td>'+esc(r.status.toUpperCase())+'</td><td><form method="POST"><input type="hidden" name="csrf_token" value="'+esc(csrf)+'"><input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="'+r.id+'"><input type="hidden" name="return_contest_id" value="'+id+'"><button class="btn btn-sm btn-outline-secondary">'+(r.status=='active'?'Withdraw':'Reactivate')+'</button></form></td></tr>'}); h+='</tbody></table></div>';box.innerHTML=h;}
+const contests={{ contest_data|tojson }}, counties={{ counties_data|tojson }}, constituencies={{ constituencies_data|tojson }}, wards={{ wards_data|tojson }}, candidateMap={{ candidate_data|tojson }}, csrf={{ csrf_token()|tojson }};
+const pos=document.getElementById('position'),county=document.getElementById('county'),con=document.getElementById('constituency'),ward=document.getElementById('ward');
+const cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),search=document.getElementById('candidateSearch');
+let currentRows=[],currentContestId='';
+function opts(el,rows,placeholder){el.innerHTML='';let o=new Option(placeholder,'');el.add(o);rows.forEach(r=>el.add(new Option(r.name,r.id)));}
+function positions(){let seen=[];contests.forEach(c=>{if(!seen.includes(c.position))seen.push(c.position)});opts(pos,seen.map(x=>({id:x,name:x})),'Select position...');}
+function refreshGeo(){let p=pos.value,needCounty=p&&p!='President',needCon=['Member of Parliament','Member of County Assembly'].includes(p),needWard=p=='Member of County Assembly';cw.style.display=needCounty?'':'none';xw.style.display=needCon?'':'none';ww.style.display=needWard?'':'none';opts(county,counties,'Select County...');opts(con,[],'Select Constituency...');opts(ward,[],'Select Ward...');chooseContest();}
+function refreshCon(){opts(con,constituencies.filter(x=>String(x.county_id)==String(county.value)),'Select Constituency...');opts(ward,[],'Select Ward...');chooseContest();}
+function refreshWard(){opts(ward,wards.filter(x=>String(x.constituency_id)==String(con.value)),'Select Ward...');chooseContest();}
+function chooseContest(){let p=pos.value,c=null;if(p==='President')c=contests.find(x=>x.position===p);else if(p&&county.value)c=contests.find(x=>x.position===p&&String(x.county_id)===String(county.value)&&(!['Member of Parliament','Member of County Assembly'].includes(p)||String(x.constituency_id)===String(con.value))&&(p!=='Member of County Assembly'||String(x.ward_id)===String(ward.value)));currentContestId=c?String(c.id):'';document.getElementById('contest_id').value=currentContestId;document.getElementById('addCandidate').disabled=!c;document.getElementById('selectedArea').textContent=c?('Selected Contest: '+p+' — '+c.area):'Select the required position and electoral area.';document.getElementById('candidateHeading').textContent=c?('Candidates for: '+p+' — '+c.area):'Select a contest';currentRows=c?(candidateMap[currentContestId]||[]):[];renderRows();}
+function renderRows(){let q=search.value.trim().toLowerCase(),rows=currentRows.filter(r=>!q||[r.name,r.party,r.abbreviation,r.candidate_number].join(' ').toLowerCase().includes(q)),box=document.getElementById('candidateRows');if(!rows.length){box.innerHTML='<div class="text-muted">'+(currentRows.length?'No candidates match your search.':'No candidates registered for this contest yet.')+'</div>';return;}box.innerHTML=rows.map(r=>`<div class="candidate-card"><div class="d-flex gap-3 align-items-center">${r.photo_data?`<img class="candidate-photo" src="${r.photo_data}" alt="">`:`<div class="candidate-photo d-flex align-items-center justify-content-center text-muted">Photo</div>`}<div class="flex-grow-1"><div class="d-flex justify-content-between gap-2"><div><strong>${esc(r.name)}</strong>${r.candidate_number?` <span class="badge text-bg-light">No. ${esc(r.candidate_number)}</span>`:''}<div class="text-muted">${esc(r.party)} (${esc(r.abbreviation)})</div></div>${r.party_symbol_data?`<img class="party-symbol" src="${r.party_symbol_data}" alt="">`:''}</div><div class="mt-2"><span class="badge ${r.status==='active'?'text-bg-success':'text-bg-secondary'}">${esc(r.status.toUpperCase())}</span> <button type="button" class="btn btn-sm btn-outline-primary ms-1" onclick="openEditById(${r.id})">Edit</button><form method="POST" class="d-inline"><input type="hidden" name="csrf_token" value="${esc(csrf)}"><input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="${r.id}"><button class="btn btn-sm btn-outline-secondary ms-1">${r.status==='active'?'Withdraw':'Reactivate'}</button></form></div></div></div></div>`).join('');}
+function openEditById(id){let r=currentRows.find(x=>String(x.id)===String(id));if(!r)return;document.getElementById('edit_id').value=r.id;document.getElementById('edit_name').value=r.name||'';document.getElementById('edit_party').value=r.party||'';document.getElementById('edit_abbr').value=r.abbreviation||'';document.getElementById('edit_number').value=r.candidate_number||'';document.getElementById('edit_manifesto').value=r.manifesto||'';bootstrap.Modal.getOrCreateInstance(document.getElementById('editCandidateModal')).show();}
 function esc(v){return String(v??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
-pos.addEventListener('change',refreshGeo);county.addEventListener('change',refreshCon);con.addEventListener('change',refreshWard);ward.addEventListener('change',chooseContest);positions();opts(county,counties);refreshGeo();
+function preview(input,img){input.addEventListener('change',()=>{let f=input.files[0];if(!f){img.classList.add('d-none');return}let u=URL.createObjectURL(f);img.src=u;img.classList.remove('d-none');});}
+preview(document.getElementById('candidate_photo'),document.getElementById('candidatePreview'));preview(document.getElementById('party_symbol'),document.getElementById('partyPreview'));
+pos.addEventListener('change',refreshGeo);county.addEventListener('change',refreshCon);con.addEventListener('change',refreshWard);ward.addEventListener('change',chooseContest);search.addEventListener('input',renderRows);positions();refreshGeo();
 </script>
 {% endblock %}
 """
@@ -1472,22 +1500,20 @@ pos.addEventListener('change',refreshGeo);county.addEventListener('change',refre
 REGIONS_HTML = """
 {% extends "base.html" %}
 {% block content %}
-<div class="row g-4">
- <div class="col-lg-5"><div class="card"><div class="card-body p-4">
-  <h3>Add County</h3>
-  <form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="add">
-  <div class="mb-3"><label class="form-label">County</label><input class="form-control" name="name" required placeholder="e.g. Nairobi"></div>
-  <div class="mb-3"><label class="form-label">Code</label><input class="form-control" name="code" placeholder="e.g. NBI"></div>
-  <button class="btn btn-primary">Add Region</button></form>
- </div></div></div>
- <div class="col-lg-7"><div class="card"><div class="card-body p-4">
-  <h3>Kenyan Counties</h3><table class="table"><thead><tr><th>Region</th><th>Code</th><th>Status</th><th></th></tr></thead><tbody>
-  {% for r in regions %}<tr><td>{{ r.name }}</td><td>{{ r.code or '-' }}</td><td>{{ 'ACTIVE' if r.active else 'INACTIVE' }}</td>
-  <td>{% if r.code != 'LEGACY' %}<form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="toggle">
-  <input type="hidden" name="region_id" value="{{ r.id }}"><button class="btn btn-sm btn-outline-secondary">{{ 'Deactivate' if r.active else 'Activate' }}</button></form>{% endif %}</td></tr>{% endfor %}
-  </tbody></table>
- </div></div></div>
-</div>
+<style>.geo-stat{font-size:1.6rem;font-weight:700;color:#17375e}.protected{font-size:.75rem}</style>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3"><div><h2>Kenyan Electoral Geography Administration</h2><p class="text-muted mb-0">Official imported electoral geography is protected reference data. Use the Geography Browser for the County → Constituency → Ward hierarchy.</p></div><a class="btn btn-outline-primary" href="{{ url_for('manage_geography') }}">Open Geography Browser</a></div>
+<div class="row g-3 mb-4"><div class="col-md-4"><div class="card card-body"><div class="geo-stat">{{ official_count }}</div><div>Official Counties</div></div></div><div class="col-md-4"><div class="card card-body"><div class="geo-stat">{{ constituency_count }}</div><div>Constituencies</div></div></div><div class="col-md-4"><div class="card card-body"><div class="geo-stat">{{ ward_count }}</div><div>County Assembly Wards</div></div></div></div>
+<div class="card"><div class="card-body p-4">
+<div class="d-flex justify-content-between flex-wrap gap-2 mb-3"><div><h3 class="mb-1">Official Kenyan Counties</h3><div class="text-muted small">Protected reference records cannot be deactivated from this screen.</div></div><input id="countySearch" class="form-control" style="max-width:280px" placeholder="Search counties..."></div>
+<div class="table-responsive"><table class="table align-middle" id="countyTable"><thead><tr><th>County</th><th>Code</th><th>Status</th><th>Protection</th></tr></thead><tbody>
+{% for r in official_regions %}<tr><td>{{ r.name }}</td><td>{{ r.code or '-' }}</td><td><span class="badge text-bg-success">ACTIVE</span></td><td><span class="badge text-bg-light border protected">REFERENCE DATA</span></td></tr>{% endfor %}
+</tbody></table></div></div></div>
+{% if legacy_region %}<div class="card border-warning mt-4"><div class="card-body"><h4>System / Legacy Record</h4><p class="mb-1"><strong>{{ legacy_region.name }}</strong> <span class="badge text-bg-warning">NOT AN ELECTORAL COUNTY</span></p><p class="text-muted small mb-0">Retained only for compatibility with historical prototype data.</p></div></div>{% endif %}
+<details class="card card-body mt-4"><summary class="fw-bold">Advanced Geography Administration</summary><div class="alert alert-warning mt-3">Imported reference geography should normally not be modified. Manual counties are separate administrative additions and all changes are written to the audit log.</div>
+<form method="POST" class="row g-2"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="add"><div class="col-md-5"><label class="form-label fw-semibold">Manual county name</label><input class="form-control" name="name" required></div><div class="col-md-3"><label class="form-label fw-semibold">Code</label><input class="form-control" name="code" placeholder="e.g. TEST"></div><div class="col-md-4 d-flex align-items-end"><button class="btn btn-outline-primary">Add Manual County</button></div></form>
+{% if manual_regions %}<hr><h5>Manual additions</h5><table class="table"><thead><tr><th>County</th><th>Code</th><th>Status</th><th></th></tr></thead><tbody>{% for r in manual_regions %}<tr><td>{{r.name}}</td><td>{{r.code or '-'}}</td><td>{{'ACTIVE' if r.active else 'INACTIVE'}}</td><td><form method="POST"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="toggle"><input type="hidden" name="region_id" value="{{r.id}}"><button class="btn btn-sm btn-outline-secondary">{{'Deactivate' if r.active else 'Activate'}}</button></form></td></tr>{% endfor %}</tbody></table>{% endif %}
+</details>
+<script>document.getElementById('countySearch').addEventListener('input',function(){let q=this.value.toLowerCase();document.querySelectorAll('#countyTable tbody tr').forEach(r=>r.style.display=r.innerText.toLowerCase().includes(q)?'':'none')});</script>
 {% endblock %}
 """
 
@@ -1922,6 +1948,29 @@ def vote():
     return render_template_string(VOTE_HTML, contest_rows=rows, open_count=sum(1 for r in rows if not r["cast"] and r["candidates"]))
 
 
+
+ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp"}
+MAX_CANDIDATE_IMAGE_BYTES = 1024 * 1024
+
+def uploaded_image_data_url(field_name):
+    """Return a small validated image as a data URL, or None when no file supplied."""
+    f = request.files.get(field_name)
+    if not f or not f.filename:
+        return None
+    mime = (f.mimetype or "").lower()
+    if mime not in ALLOWED_IMAGE_MIMES:
+        raise ValueError("Images must be JPG, PNG or WebP.")
+    raw = f.read(MAX_CANDIDATE_IMAGE_BYTES + 1)
+    if len(raw) > MAX_CANDIDATE_IMAGE_BYTES:
+        raise ValueError("Each image must be 1 MB or smaller.")
+    # Lightweight signature validation prevents a renamed arbitrary file.
+    valid = ((mime == "image/jpeg" and raw[:3] == b"\\xff\\xd8\\xff") or
+             (mime == "image/png" and raw[:8] == b"\\x89PNG\\r\\n\\x1a\\n") or
+             (mime == "image/webp" and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"))
+    if not valid:
+        raise ValueError("The uploaded file does not appear to be a valid image.")
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
 @app.route("/admin/candidates", methods=["GET", "POST"])
 @admin_required
 def manage_candidates():
@@ -1936,11 +1985,34 @@ def manage_candidates():
             if not contest:
                 flash("Select a valid contest in the current election.","danger"); return redirect(url_for("manage_candidates"))
             if name and party and abbr:
-                c=Candidate(name=name,party=party,abbreviation=abbr,candidate_number=request.form.get("candidate_number","").strip() or None,manifesto=request.form.get("manifesto","").strip() or None,status="active")
+                try:
+                    photo=uploaded_image_data_url("candidate_photo"); symbol=uploaded_image_data_url("party_symbol")
+                except ValueError as exc:
+                    flash(str(exc),"danger"); return redirect(url_for("manage_candidates"))
+                c=Candidate(name=name,party=party,abbreviation=abbr,candidate_number=request.form.get("candidate_number","").strip() or None,manifesto=request.form.get("manifesto","").strip() or None,photo_data=photo,party_symbol_data=symbol,status="active")
                 db.session.add(c); db.session.flush(); db.session.add(ContestCandidate(contest_id=contest.id,candidate_id=c.id)); db.session.commit()
                 log_event("CANDIDATE_CREATED","WARNING",user.id,f"{c.id}: {c.name}; contest={contest.id}; election={election.id}")
                 flash(f"Candidate added to {contest.position} — {contest_area_name(contest)}.","success"); return redirect(url_for("manage_candidates"))
             flash("Name, party and abbreviation are required.","danger")
+        elif action == "edit":
+            cid=request.form.get("candidate_id",""); c=Candidate.query.get(int(cid)) if cid.isdigit() else None
+            if c:
+                links=ContestCandidate.query.filter_by(candidate_id=c.id).all()
+                if not any(Contest.query.filter_by(id=l.contest_id,election_id=election.id).first() for l in links):
+                    abort(403)
+                c.name=request.form.get("name","").strip() or c.name
+                c.party=request.form.get("party","").strip() or c.party
+                c.abbreviation=request.form.get("abbreviation","").strip().upper() or c.abbreviation
+                c.candidate_number=request.form.get("candidate_number","").strip() or None
+                c.manifesto=request.form.get("manifesto","").strip() or None
+                try:
+                    photo=uploaded_image_data_url("candidate_photo"); symbol=uploaded_image_data_url("party_symbol")
+                except ValueError as exc:
+                    flash(str(exc),"danger"); return redirect(url_for("manage_candidates"))
+                if photo: c.photo_data=photo
+                if symbol: c.party_symbol_data=symbol
+                db.session.commit(); log_event("CANDIDATE_EDITED","WARNING",user.id,f"{c.id}: {c.name}")
+                flash("Candidate details updated.","success"); return redirect(url_for("manage_candidates"))
         elif action == "toggle":
             cid=request.form.get("candidate_id",""); c=Candidate.query.get(int(cid)) if cid.isdigit() else None
             if c:
@@ -1952,7 +2024,7 @@ def manage_candidates():
     candidate_data={}
     for link in ContestCandidate.query.filter(ContestCandidate.contest_id.in_([c.id for c in contests])).all() if contests else []:
         cand=Candidate.query.get(link.candidate_id)
-        if cand: candidate_data.setdefault(str(link.contest_id),[]).append({"id":cand.id,"name":cand.name,"party":cand.party,"abbreviation":cand.abbreviation,"status":cand.status})
+        if cand: candidate_data.setdefault(str(link.contest_id),[]).append({"id":cand.id,"name":cand.name,"party":cand.party,"abbreviation":cand.abbreviation,"candidate_number":cand.candidate_number,"manifesto":cand.manifesto,"photo_data":cand.photo_data,"party_symbol_data":cand.party_symbol_data,"status":cand.status})
     return render_template_string(CANDIDATES_HTML,election=election,contest_data=contest_data,counties_data=[{"id":x.id,"name":x.name} for x in counties],constituencies_data=[{"id":x.id,"name":x.name,"county_id":x.county_id} for x in cons],wards_data=[{"id":x.id,"name":x.name,"constituency_id":x.constituency_id} for x in ws],candidate_data=candidate_data)
 
 
@@ -1966,23 +2038,32 @@ def manage_regions():
         if action == "add":
             name = request.form.get("name", "").strip()
             short_code = request.form.get("code", "").strip().upper() or None
-            if name and not Region.query.filter(db.func.lower(Region.name) == name.lower()).first():
+            if short_code and re.fullmatch(r"0(?:0[1-9]|[1-3][0-9]|4[0-7])", short_code):
+                flash("Codes 001–047 are reserved for protected official counties.", "danger")
+            elif name and not Region.query.filter(db.func.lower(Region.name) == name.lower()).first():
                 r = Region(name=name, code=short_code, active=True)
                 db.session.add(r); db.session.commit()
-                log_event("REGION_CREATED", "WARNING", user.id, f"{r.id}: {r.name}")
-                flash("County added.", "success")
+                log_event("MANUAL_COUNTY_CREATED", "WARNING", user.id, f"{r.id}: {r.name}")
+                flash("Manual county record added.", "success")
                 return redirect(url_for("manage_regions"))
-            flash("Enter a unique region name.", "danger")
+            else:
+                flash("Enter a unique county name.", "danger")
         elif action == "toggle":
             rid = request.form.get("region_id", "")
             r = Region.query.get(int(rid)) if rid.isdigit() else None
-            if r and r.code != "LEGACY":
+            if r and not (r.code == "LEGACY" or (r.code and re.fullmatch(r"0(?:0[1-9]|[1-3][0-9]|4[0-7])", r.code))):
                 r.active = not r.active
                 db.session.commit()
-                log_event("REGION_STATUS_CHANGED", "WARNING", user.id, f"{r.id}: active={r.active}")
-                flash("County status updated.", "success")
+                log_event("MANUAL_COUNTY_STATUS_CHANGED", "WARNING", user.id, f"{r.id}: active={r.active}")
+                flash("Manual county status updated.", "success")
                 return redirect(url_for("manage_regions"))
-    return render_template_string(REGIONS_HTML, regions=Region.query.order_by(Region.name).all())
+            flash("Official reference counties and the legacy record are protected.", "warning")
+    regions=Region.query.order_by(Region.name).all()
+    official=[r for r in regions if r.code and re.fullmatch(r"0(?:0[1-9]|[1-3][0-9]|4[0-7])", r.code)]
+    legacy=next((r for r in regions if r.code=="LEGACY"),None)
+    manual=[r for r in regions if r not in official and r is not legacy]
+    return render_template_string(REGIONS_HTML, official_regions=official, legacy_region=legacy, manual_regions=manual, official_count=len(official), constituency_count=Constituency.query.count(), ward_count=Ward.query.count())
+
 
 
 POSITIONS = ["President", "Governor", "Senator", "Woman Representative", "Member of Parliament", "Member of County Assembly"]
