@@ -1418,31 +1418,54 @@ ADMIN_HTML = """
 CANDIDATES_HTML = """
 {% extends "base.html" %}
 {% block content %}
+<style>
+ .candidate-filter label,.candidate-form label{font-weight:600;color:#183a61}
+ .candidate-filter .form-select,.candidate-form .form-control{background:#f5f9fd}
+</style>
 <div class="row g-4">
  <div class="col-lg-5"><div class="card"><div class="card-body p-4">
   <h3>Candidate Registration</h3>
-  <form method="POST">
-   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-   <input type="hidden" name="action" value="add">
-   <div class="mb-3"><label class="form-label">Contest</label><select class="form-select" name="contest_id" required>{% for x in contests %}<option value="{{x.id}}">{{x.position}} — {{area(x)}}</option>{% endfor %}</select></div><div class="mb-3"><label class="form-label">Full name</label><input class="form-control" name="name" required></div>
+  <div class="alert alert-light border small mb-3"><strong>Election:</strong> {{ election.title }}</div>
+  <div class="candidate-filter">
+   <div class="mb-3"><label class="form-label">Position</label><select id="position" class="form-select"></select></div>
+   <div class="mb-3" id="countyWrap"><label class="form-label">County</label><select id="county" class="form-select"></select></div>
+   <div class="mb-3" id="constituencyWrap"><label class="form-label">Constituency</label><select id="constituency" class="form-select"></select></div>
+   <div class="mb-3" id="wardWrap"><label class="form-label">Ward</label><select id="ward" class="form-select"></select></div>
+   <div class="small text-muted mb-3" id="selectedArea"></div>
+  </div>
+  <form method="POST" class="candidate-form" id="candidateForm">
+   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="add"><input type="hidden" name="contest_id" id="contest_id">
+   <div class="mb-3"><label class="form-label">Full name</label><input class="form-control" name="name" required></div>
    <div class="mb-3"><label class="form-label">Political party</label><input class="form-control" name="party" required></div>
-   <div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" required></div>
-   <div class="col"><label class="form-label">Candidate number</label><input class="form-control" name="candidate_number"></div></div>
+   <div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" required></div><div class="col"><label class="form-label">Candidate number</label><input class="form-control" name="candidate_number"></div></div>
    <div class="my-3"><label class="form-label">Short manifesto/profile</label><textarea class="form-control" name="manifesto" rows="4"></textarea></div>
-   <button class="btn btn-primary">Add Candidate</button>
+   <button class="btn btn-primary" id="addCandidate">Add Candidate</button>
   </form>
  </div></div></div>
  <div class="col-lg-7"><div class="card"><div class="card-body p-4">
-  <h3>Registered Candidates</h3>
-  <table class="table"><thead><tr><th>Candidate</th><th>Party</th><th>Status</th><th></th></tr></thead><tbody>
-  {% for c in candidates %}<tr><td>{{ c.name }}</td><td>{{ c.party }} ({{ c.abbreviation }})</td>
-  <td>{{ c.status|upper }}</td><td><form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="{{ c.id }}">
-  <button class="btn btn-sm btn-outline-secondary">{{ 'Withdraw' if c.status == 'active' else 'Reactivate' }}</button></form></td></tr>{% endfor %}
-  </tbody></table>
-  <div class="alert alert-info small">Candidates are withdrawn rather than deleted, preserving existing ballot history.</div>
+  <h3>Registered Candidates</h3><h6 class="text-muted mb-3" id="candidateHeading">Select a contest</h6>
+  <div id="candidateRows"><div class="text-muted">Choose a position and area to view candidates for that contest.</div></div>
+  <div class="alert alert-info small mt-3">Candidates are withdrawn rather than deleted, preserving existing ballot history. Only candidates for the selected contest are shown.</div>
  </div></div></div>
 </div>
+<script>
+const contests={{ contest_data|tojson }};
+const counties={{ counties_data|tojson }};
+const constituencies={{ constituencies_data|tojson }};
+const wards={{ wards_data|tojson }};
+const candidateMap={{ candidate_data|tojson }};
+const csrf={{ csrf_token()|tojson }};
+const pos=document.getElementById('position'), county=document.getElementById('county'), con=document.getElementById('constituency'), ward=document.getElementById('ward');
+const cw=document.getElementById('countyWrap'), xw=document.getElementById('constituencyWrap'), ww=document.getElementById('wardWrap');
+function opts(el, rows, placeholder){el.innerHTML=''; if(placeholder){let o=new Option(placeholder,'');el.add(o)} rows.forEach(r=>el.add(new Option(r.name,r.id)));}
+function positions(){let seen=[]; contests.forEach(c=>{if(!seen.includes(c.position))seen.push(c.position)}); opts(pos,seen.map(x=>({id:x,name:x})));}
+function refreshGeo(){let p=pos.value, needCounty=p!='President', needCon=p=='Member of Parliament'||p=='Member of County Assembly', needWard=p=='Member of County Assembly'; cw.style.display=needCounty?'':'none';xw.style.display=needCon?'':'none';ww.style.display=needWard?'':'none'; if(needCounty && !county.options.length) opts(county,counties); refreshCon();}
+function refreshCon(){let rows=constituencies.filter(x=>String(x.county_id)==String(county.value)); opts(con,rows); refreshWard();}
+function refreshWard(){let rows=wards.filter(x=>String(x.constituency_id)==String(con.value)); opts(ward,rows); chooseContest();}
+function chooseContest(){let p=pos.value; let c=contests.find(x=>x.position==p && (p=='President'||String(x.county_id)==String(county.value)) && (!['Member of Parliament','Member of County Assembly'].includes(p)||String(x.constituency_id)==String(con.value)) && (p!='Member of County Assembly'||String(x.ward_id)==String(ward.value))); let id=c?c.id:''; document.getElementById('contest_id').value=id; document.getElementById('addCandidate').disabled=!id; let area=c?c.area:'No matching contest'; document.getElementById('selectedArea').textContent=c?('Selected contest: '+p+' — '+area):'No matching contest found.'; document.getElementById('candidateHeading').textContent=c?('Candidates for: '+p+' — '+area):'Select a contest'; let rows=c?(candidateMap[String(id)]||[]):[]; let box=document.getElementById('candidateRows'); if(!rows.length){box.innerHTML='<div class="text-muted">No candidates registered for this contest yet.</div>';return;} let h='<div class="table-responsive"><table class="table"><thead><tr><th>Candidate</th><th>Party</th><th>Status</th><th></th></tr></thead><tbody>'; rows.forEach(r=>{h+='<tr><td>'+esc(r.name)+'</td><td>'+esc(r.party)+' ('+esc(r.abbreviation)+')</td><td>'+esc(r.status.toUpperCase())+'</td><td><form method="POST"><input type="hidden" name="csrf_token" value="'+esc(csrf)+'"><input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="'+r.id+'"><input type="hidden" name="return_contest_id" value="'+id+'"><button class="btn btn-sm btn-outline-secondary">'+(r.status=='active'?'Withdraw':'Reactivate')+'</button></form></td></tr>'}); h+='</tbody></table></div>';box.innerHTML=h;}
+function esc(v){return String(v??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
+pos.addEventListener('change',refreshGeo);county.addEventListener('change',refreshCon);con.addEventListener('change',refreshWard);ward.addEventListener('change',chooseContest);positions();opts(county,counties);refreshGeo();
+</script>
 {% endblock %}
 """
 
@@ -1903,38 +1926,34 @@ def vote():
 @admin_required
 def manage_candidates():
     user = current_user()
+    election = get_election()
     if request.method == "POST":
         validate_csrf()
         action = request.form.get("action")
         if action == "add":
-            name = request.form.get("name", "").strip()
-            party = request.form.get("party", "").strip()
-            abbr = request.form.get("abbreviation", "").strip().upper()
+            name=request.form.get("name","").strip(); party=request.form.get("party","").strip(); abbr=request.form.get("abbreviation","").strip().upper(); cr=request.form.get("contest_id","")
+            contest=Contest.query.filter_by(id=int(cr), election_id=election.id, active=True).first() if cr.isdigit() else None
+            if not contest:
+                flash("Select a valid contest in the current election.","danger"); return redirect(url_for("manage_candidates"))
             if name and party and abbr:
-                c = Candidate(name=name, party=party, abbreviation=abbr,
-                              candidate_number=request.form.get("candidate_number", "").strip() or None,
-                              manifesto=request.form.get("manifesto", "").strip() or None,
-                              status="active")
-                db.session.add(c); db.session.flush()
-                cr=request.form.get("contest_id","")
-                if not cr.isdigit() or not Contest.query.get(int(cr)):
-                    db.session.rollback(); flash("Select a valid election contest for the candidate.", "danger"); return redirect(url_for("manage_candidates"))
-                db.session.add(ContestCandidate(contest_id=int(cr),candidate_id=c.id))
-                db.session.commit()
-                log_event("CANDIDATE_CREATED", "WARNING", user.id, f"{c.id}: {c.name}")
-                flash("Candidate added.", "success")
-                return redirect(url_for("manage_candidates"))
-            flash("Name, party and abbreviation are required.", "danger")
+                c=Candidate(name=name,party=party,abbreviation=abbr,candidate_number=request.form.get("candidate_number","").strip() or None,manifesto=request.form.get("manifesto","").strip() or None,status="active")
+                db.session.add(c); db.session.flush(); db.session.add(ContestCandidate(contest_id=contest.id,candidate_id=c.id)); db.session.commit()
+                log_event("CANDIDATE_CREATED","WARNING",user.id,f"{c.id}: {c.name}; contest={contest.id}; election={election.id}")
+                flash(f"Candidate added to {contest.position} — {contest_area_name(contest)}.","success"); return redirect(url_for("manage_candidates"))
+            flash("Name, party and abbreviation are required.","danger")
         elif action == "toggle":
-            cid = request.form.get("candidate_id", "")
-            c = Candidate.query.get(int(cid)) if cid.isdigit() else None
+            cid=request.form.get("candidate_id",""); c=Candidate.query.get(int(cid)) if cid.isdigit() else None
             if c:
-                c.status = "withdrawn" if c.status == "active" else "active"
-                db.session.commit()
-                log_event("CANDIDATE_STATUS_CHANGED", "WARNING", user.id, f"{c.id}: {c.status}")
-                flash("Candidate status updated.", "success")
-                return redirect(url_for("manage_candidates"))
-    return render_template_string(CANDIDATES_HTML, candidates=Candidate.query.order_by(Candidate.id).all(), contests=Contest.query.filter_by(active=True,election_id=get_election().id).all(), area=contest_area_name)
+                c.status="withdrawn" if c.status=="active" else "active"; db.session.commit(); log_event("CANDIDATE_STATUS_CHANGED","WARNING",user.id,f"{c.id}: {c.status}"); flash("Candidate status updated.","success"); return redirect(url_for("manage_candidates"))
+    contests=Contest.query.filter_by(active=True,election_id=election.id).order_by(Contest.id).all()
+    counties=Region.query.filter(Region.code!="LEGACY",Region.active==True).order_by(Region.name).all()
+    cons=Constituency.query.filter_by(active=True).order_by(Constituency.name).all(); ws=Ward.query.filter_by(active=True).order_by(Ward.name).all()
+    contest_data=[{"id":c.id,"position":c.position,"scope_level":c.scope_level,"county_id":c.county_id,"constituency_id":c.constituency_id,"ward_id":c.ward_id,"area":contest_area_name(c)} for c in contests]
+    candidate_data={}
+    for link in ContestCandidate.query.filter(ContestCandidate.contest_id.in_([c.id for c in contests])).all() if contests else []:
+        cand=Candidate.query.get(link.candidate_id)
+        if cand: candidate_data.setdefault(str(link.contest_id),[]).append({"id":cand.id,"name":cand.name,"party":cand.party,"abbreviation":cand.abbreviation,"status":cand.status})
+    return render_template_string(CANDIDATES_HTML,election=election,contest_data=contest_data,counties_data=[{"id":x.id,"name":x.name} for x in counties],constituencies_data=[{"id":x.id,"name":x.name,"county_id":x.county_id} for x in cons],wards_data=[{"id":x.id,"name":x.name,"constituency_id":x.constituency_id} for x in ws],candidate_data=candidate_data)
 
 
 @app.route("/admin/regions", methods=["GET", "POST"])
