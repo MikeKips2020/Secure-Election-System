@@ -1476,7 +1476,26 @@ gx.addEventListener('change', async()=>{gw.disabled=true;if(!gx.value){gw.innerH
 const ac=document.getElementById('adminCounty'), ax=document.getElementById('adminCon'); ac.addEventListener('change',async()=>{ax.disabled=true;if(!ac.value){ax.innerHTML='<option value="">Select county first</option>';return;}const rows=await getJSON('/api/constituencies/'+ac.value);ax.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ax.disabled=false;});
 </script>{% endblock %}"""
 
-CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}<h2>Election Contests</h2><p>President is national; Governor, Senator and Woman Representative are county contests; MP is constituency; MCA is ward.</p><form method='post' class='card card-body mb-4'><input type='hidden' name='csrf_token' value='{{ csrf_token() }}'><select class='form-select mb-2' name='position'>{% for p in positions %}<option>{{p}}</option>{% endfor %}</select><select class='form-select mb-2' name='county_id'><option value=''>County if applicable</option>{% for c in counties %}<option value='{{c.id}}'>{{c.name}}</option>{% endfor %}</select><select class='form-select mb-2' name='constituency_id'><option value=''>Constituency if applicable</option>{% for x in constituencies %}<option value='{{x.id}}'>{{x.name}}</option>{% endfor %}</select><select class='form-select mb-2' name='ward_id'><option value=''>Ward if applicable</option>{% for w in wards %}<option value='{{w.id}}'>{{w.name}}</option>{% endfor %}</select><button class='btn btn-primary'>Create Contest</button></form><table class='table'><tr><th>Position</th><th>Area</th></tr>{% for c in contests %}<tr><td>{{c.position}}</td><td>{{area(c)}}</td></tr>{% endfor %}</table>{% endblock %}"""
+CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}
+<style>
+.contest-form .form-label{font-weight:600;color:#294866}.contest-form .form-select{font-weight:600;color:#263f5d;background-color:#f4f8fc;border-color:#cbd9e7}.contest-form .form-select:disabled{background-color:#eef2f6;color:#7b8794}.scope-note{background:#eef7ff;border:1px solid #cfe7fb;color:#315a78;border-radius:.5rem;padding:.65rem .8rem}
+</style>
+<h2>Election Contests</h2><p class='text-muted'>President is national; Governor, Senator and Woman Representative are county contests; MP is constituency; MCA is ward.</p>
+<form method='post' class='card card-body mb-4 contest-form' id='contestForm'><input type='hidden' name='csrf_token' value='{{ csrf_token() }}'>
+<div class='mb-3'><label class='form-label' for='position'>Position</label><select class='form-select' id='position' name='position'>{% for p in positions %}<option>{{p}}</option>{% endfor %}</select></div>
+<div id='scopeNote' class='scope-note mb-3'>National contest — no geographic selection is required.</div>
+<div class='mb-3' id='countyWrap'><label class='form-label' for='contestCounty'>County</label><select class='form-select' id='contestCounty' name='county_id'><option value=''>Select county</option>{% for c in counties %}<option value='{{c.id}}'>{{c.name}}</option>{% endfor %}</select></div>
+<div class='mb-3' id='constituencyWrap'><label class='form-label' for='contestConstituency'>Constituency</label><select class='form-select' id='contestConstituency' name='constituency_id' disabled><option value=''>Select county first</option></select></div>
+<div class='mb-3' id='wardWrap'><label class='form-label' for='contestWard'>Ward</label><select class='form-select' id='contestWard' name='ward_id' disabled><option value=''>Select constituency first</option></select></div>
+<button class='btn btn-primary'>Create Contest</button></form>
+<table class='table'><tr><th>Position</th><th>Area</th></tr>{% for c in contests %}<tr><td>{{c.position}}</td><td>{{area(c)}}</td></tr>{% else %}<tr><td colspan='2' class='text-muted'>No contests created yet.</td></tr>{% endfor %}</table>
+<script>
+const pos=document.getElementById('position'), cw=document.getElementById('countyWrap'), xw=document.getElementById('constituencyWrap'), ww=document.getElementById('wardWrap'), county=document.getElementById('contestCounty'), con=document.getElementById('contestConstituency'), ward=document.getElementById('contestWard'), note=document.getElementById('scopeNote');
+function mode(){const p=pos.value;const national=p==='President', countyOnly=['Governor','Senator','Woman Representative'].includes(p), mp=p==='Member of Parliament';cw.style.display=national?'none':'';xw.style.display=(national||countyOnly)?'none':'';ww.style.display=(national||countyOnly||mp)?'none':'';county.required=!national;con.required=mp||p==='Member of County Assembly';ward.required=p==='Member of County Assembly';note.textContent=national?'National contest — no geographic selection is required.':countyOnly?'County contest — select the county only.':mp?'Constituency contest — select County, then Constituency.':'Ward contest — select County, Constituency, then Ward.';}
+pos.addEventListener('change',mode);mode();
+county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;ward.innerHTML='<option value="">Select constituency first</option>';if(!county.value){con.innerHTML='<option value="">Select county first</option>';return;}const rows=await fetch('/api/constituencies/'+county.value).then(r=>r.json());con.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');con.disabled=false;});
+con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value){ward.innerHTML='<option value="">Select constituency first</option>';return;}const rows=await fetch('/api/wards/'+con.value).then(r=>r.json());ward.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=false;});
+</script>{% endblock %}"""
 
 AUDIT_LOG_HTML = """
 {% extends "base.html" %}{% block content %}
@@ -1942,12 +1961,31 @@ def manage_contests():
     if request.method=="POST":
         validate_csrf(); pos=request.form.get("position"); county=request.form.get("county_id",""); con=request.form.get("constituency_id",""); ward=request.form.get("ward_id","")
         county=int(county) if county.isdigit() else None; con=int(con) if con.isdigit() else None; ward=int(ward) if ward.isdigit() else None
-        if pos=="President": scope="national"; county=con=ward=None
-        elif pos in ("Governor","Senator","Woman Representative"): scope="county"
-        elif pos=="Member of Parliament": scope="constituency"
-        else: scope="ward"
-        db.session.add(Contest(position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward)); db.session.commit(); flash("Contest created.","success"); return redirect(url_for("manage_contests"))
-    return render_template_string(CONTESTS_V3, positions=POSITIONS, counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(), constituencies=Constituency.query.all(), wards=Ward.query.all(), contests=Contest.query.all(), area=contest_area_name)
+        if pos not in POSITIONS:
+            flash("Select a valid election position.","danger"); return redirect(url_for("manage_contests"))
+        if pos=="President":
+            scope="national"; county=con=ward=None
+        elif pos in ("Governor","Senator","Woman Representative"):
+            scope="county"; con=ward=None
+            if not county or not Region.query.filter_by(id=county,active=True).first():
+                flash("Select a valid county for this contest.","danger"); return redirect(url_for("manage_contests"))
+        elif pos=="Member of Parliament":
+            scope="constituency"; ward=None
+            constituency=Constituency.query.get(con) if con else None
+            if not county or not constituency or constituency.county_id != county:
+                flash("Select a constituency that belongs to the selected county.","danger"); return redirect(url_for("manage_contests"))
+        else:
+            scope="ward"
+            constituency=Constituency.query.get(con) if con else None; ward_obj=Ward.query.get(ward) if ward else None
+            if not county or not constituency or constituency.county_id != county or not ward_obj or ward_obj.constituency_id != con:
+                flash("Select a ward that belongs to the selected constituency and county.","danger"); return redirect(url_for("manage_contests"))
+        duplicate=Contest.query.filter_by(election_id=1,position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward).first()
+        if duplicate:
+            flash("That election contest already exists for this area.","warning"); return redirect(url_for("manage_contests"))
+        db.session.add(Contest(position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward)); db.session.commit()
+        user=current_user(); log_event("CONTEST_CREATED","INFO",user.id if user else None,f"{pos} — {scope}")
+        flash("Contest created.","success"); return redirect(url_for("manage_contests"))
+    return render_template_string(CONTESTS_V3, positions=POSITIONS, counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(), contests=Contest.query.order_by(Contest.position,Contest.id).all(), area=contest_area_name)
 
 @app.route("/results")
 def results():
