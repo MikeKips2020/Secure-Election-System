@@ -299,6 +299,9 @@ class ElectionSetting(db.Model):
     results_visible = db.Column(db.Boolean, default=True, nullable=False)
     opens_at = db.Column(db.DateTime, nullable=True)
     closes_at = db.Column(db.DateTime, nullable=True)
+    election_type = db.Column(db.String(30), nullable=False, default="general")
+    election_date = db.Column(db.Date, nullable=True)
+    is_current = db.Column(db.Boolean, nullable=False, default=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -407,14 +410,15 @@ def log_event(event_type, severity="INFO", user_id=None, details=None):
 
 
 def get_election():
-    election = ElectionSetting.query.first()
+    # RC7: one explicitly selected current election; preserve the original row on upgrade.
+    election = ElectionSetting.query.filter_by(is_current=True).order_by(ElectionSetting.id.desc()).first()
     if not election:
-        election = ElectionSetting(
-            title=ELECTION_DEFAULT_TITLE,
-            is_open=True,
-            results_visible=True
-        )
-        db.session.add(election)
+        election = ElectionSetting.query.order_by(ElectionSetting.id.asc()).first()
+        if not election:
+            election = ElectionSetting(title=ELECTION_DEFAULT_TITLE, is_open=True, results_visible=False, election_type="general", is_current=True)
+            db.session.add(election)
+        else:
+            election.is_current = True
         db.session.commit()
     return election
 
@@ -445,7 +449,7 @@ def eligible_contests_for(user):
     """Return active contests this voter is entitled to participate in."""
     if not user or user.role == "admin":
         return []
-    q = Contest.query.filter_by(active=True, election_id=1)
+    q = Contest.query.filter_by(active=True, election_id=get_election().id)
     contests = []
     for c in q.order_by(Contest.id).all():
         if c.scope_level == "national":
@@ -585,7 +589,19 @@ def migrate_database():
             if "created_at" not in cols:
                 connection.execute(text("ALTER TABLE candidates ADD COLUMN created_at TIMESTAMP"))
 
-    print("[INFO] Automatic database migration for Advanced Version 3.1.1 Release Candidate completed.")
+    inspector = inspect(db.engine)
+    if "election_settings" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("election_settings")}
+        with db.engine.begin() as connection:
+            if "election_type" not in cols:
+                connection.execute(text("ALTER TABLE election_settings ADD COLUMN election_type VARCHAR(30) NOT NULL DEFAULT 'general'"))
+            if "election_date" not in cols:
+                connection.execute(text("ALTER TABLE election_settings ADD COLUMN election_date DATE"))
+            if "is_current" not in cols:
+                connection.execute(text("ALTER TABLE election_settings ADD COLUMN is_current BOOLEAN NOT NULL DEFAULT FALSE"))
+                connection.execute(text("UPDATE election_settings SET is_current = TRUE WHERE id = (SELECT MIN(id) FROM election_settings)"))
+
+    print("[INFO] Automatic database migration for Advanced Version 3.1.1 RC7 completed.")
 
 
 
@@ -1331,6 +1347,7 @@ ADMIN_HTML = """
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_candidates') }}">Manage Candidates</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_regions') }}">Manage Counties</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_geography') }}">Constituencies & Wards</a>
+          <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_elections') }}">Manage Elections</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_contests') }}">Election Contests</a>
           <form method="POST" action="{{ url_for('reload_kenya_geography') }}" class="d-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-success btn-sm">Verify / Load Kenya Geography</button></form>
         </div>
@@ -1497,6 +1514,22 @@ county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;
 con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value){ward.innerHTML='<option value="">Select constituency first</option>';return;}const rows=await fetch('/api/wards/'+con.value).then(r=>r.json());ward.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=false;});
 </script>{% endblock %}"""
 
+ELECTIONS_RC7 = """{% extends 'base.html' %}{% block content %}
+<style>.election-form .form-label{font-weight:600;color:#294866}.election-form .form-select,.election-form .form-control{font-weight:600;color:#263f5d;background:#f4f8fc;border-color:#cbd9e7}</style>
+<h2>Election Management</h2><p class="text-muted">Create either a five-year General Election or a vacancy By-Election. Each election keeps its own contests, ballots and results.</p>
+<div class="card card-body mb-4 election-form"><h4>Create Election</h4><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="create">
+<div class="row g-3"><div class="col-md-5"><label class="form-label">Election title</label><input class="form-control" name="title" required placeholder="e.g. Kenya General Election"></div><div class="col-md-3"><label class="form-label">Election type</label><select class="form-select" id="etype" name="election_type"><option value="general">General Election</option><option value="by_election">By-Election</option></select></div><div class="col-md-4"><label class="form-label">Election date</label><input class="form-control" type="date" name="election_date" required></div></div>
+<div id="byFields" class="mt-3" style="display:none"><div class="alert alert-info py-2">A By-Election creates one vacant-seat contest only.</div><div class="row g-3"><div class="col-md-3"><label class="form-label">Position</label><select class="form-select" id="byPos" name="position">{% for p in by_positions %}<option>{{p}}</option>{% endfor %}</select></div><div class="col-md-3" id="byCountyWrap"><label class="form-label">County</label><select class="form-select" id="byCounty" name="county_id"><option value="">Select county</option>{% for c in counties %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></div><div class="col-md-3" id="byConWrap"><label class="form-label">Constituency</label><select class="form-select" id="byCon" name="constituency_id" disabled><option value="">Select county first</option></select></div><div class="col-md-3" id="byWardWrap"><label class="form-label">Ward</label><select class="form-select" id="byWard" name="ward_id" disabled><option value="">Select constituency first</option></select></div></div></div>
+<div class="form-check mt-3"><input class="form-check-input" type="checkbox" name="make_current" id="makeCurrent" checked><label class="form-check-label" for="makeCurrent">Make this the current election</label></div><button class="btn btn-primary mt-3">Create Election</button></form></div>
+<div class="card card-body"><h4>Election History</h4><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Election</th><th>Type</th><th>Date</th><th>Contests</th><th>Status</th><th></th></tr></thead><tbody>{% for e in elections %}<tr><td><strong>{{e.title}}</strong></td><td>{{'General Election' if e.election_type=='general' else 'By-Election'}}</td><td>{{e.election_date or '-'}}</td><td>{{contest_counts.get(e.id,0)}}</td><td>{% if e.is_current %}<span class="badge text-bg-success">CURRENT</span>{% else %}<span class="badge text-bg-secondary">HISTORICAL</span>{% endif %}</td><td>{% if not e.is_current %}<form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="select"><input type="hidden" name="election_id" value="{{e.id}}"><button class="btn btn-sm btn-outline-primary">Make Current</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>
+<script>
+const et=document.getElementById('etype'), bf=document.getElementById('byFields'), bp=document.getElementById('byPos'), bc=document.getElementById('byCounty'), bx=document.getElementById('byCon'), bw=document.getElementById('byWard'), bcw=document.getElementById('byCountyWrap'), bxw=document.getElementById('byConWrap'), bww=document.getElementById('byWardWrap');
+function typeMode(){bf.style.display=et.value==='by_election'?'':'none'}; et.addEventListener('change',typeMode);typeMode();
+function posMode(){const p=bp.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';bcw.style.display=n?'none':'';bxw.style.display=(n||co)?'none':'';bww.style.display=(n||co||mp)?'none':'';}bp.addEventListener('change',posMode);posMode();
+bc.addEventListener('change',async()=>{bx.disabled=true;bw.disabled=true;bw.innerHTML='<option value="">Select constituency first</option>';if(!bc.value)return;const r=await fetch('/api/constituencies/'+bc.value).then(x=>x.json());bx.innerHTML='<option value="">Select constituency</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bx.disabled=false});
+bx.addEventListener('change',async()=>{bw.disabled=true;if(!bx.value)return;const r=await fetch('/api/wards/'+bx.value).then(x=>x.json());bw.innerHTML='<option value="">Select ward</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bw.disabled=false});
+</script>{% endblock %}"""
+
 AUDIT_LOG_HTML = """
 {% extends "base.html" %}{% block content %}
 <div class="card"><div class="card-body p-4"><div class="d-flex justify-content-between"><div><h2>Full Security Audit Log</h2><p class="text-muted">Immutable application audit history. Dashboard Clear View does not delete these records.</p></div><a class="btn btn-outline-secondary align-self-start" href="{{ url_for('admin_dashboard') }}">Back to Admin</a></div>
@@ -1520,6 +1553,7 @@ app.jinja_loader = DictLoader({
     "regions.html": REGIONS_HTML,
     "geography_v3.html": GEOGRAPHY_V3,
     "contests_v3.html": CONTESTS_V3,
+    "elections_rc7.html": ELECTIONS_RC7,
 })
 
 
@@ -1900,7 +1934,7 @@ def manage_candidates():
                 log_event("CANDIDATE_STATUS_CHANGED", "WARNING", user.id, f"{c.id}: {c.status}")
                 flash("Candidate status updated.", "success")
                 return redirect(url_for("manage_candidates"))
-    return render_template_string(CANDIDATES_HTML, candidates=Candidate.query.order_by(Candidate.id).all(), contests=Contest.query.filter_by(active=True).all(), area=contest_area_name)
+    return render_template_string(CANDIDATES_HTML, candidates=Candidate.query.order_by(Candidate.id).all(), contests=Contest.query.filter_by(active=True,election_id=get_election().id).all(), area=contest_area_name)
 
 
 @app.route("/admin/regions", methods=["GET", "POST"])
@@ -1955,6 +1989,59 @@ def manage_geography():
     counties = Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all()
     return render_template_string(GEOGRAPHY_V3, counties=counties, county_count=len(counties), constituency_count=Constituency.query.count(), ward_count=Ward.query.count())
 
+def _create_contest_if_missing(election_id, position, scope, county=None, constituency=None, ward=None):
+    exists=Contest.query.filter_by(election_id=election_id,position=position,scope_level=scope,county_id=county,constituency_id=constituency,ward_id=ward).first()
+    if not exists: db.session.add(Contest(election_id=election_id,position=position,scope_level=scope,county_id=county,constituency_id=constituency,ward_id=ward,active=True)); return 1
+    return 0
+
+def _build_general_election_contests(election_id):
+    created=_create_contest_if_missing(election_id,"President","national")
+    counties=Region.query.filter(Region.code!="LEGACY",Region.active==True).all()
+    for county in counties:
+        for p in ("Governor","Senator","Woman Representative"): created+=_create_contest_if_missing(election_id,p,"county",county=county.id)
+    for con in Constituency.query.filter_by(active=True).all(): created+=_create_contest_if_missing(election_id,"Member of Parliament","constituency",county=con.county_id,constituency=con.id)
+    for ward in Ward.query.filter_by(active=True).all():
+        con=Constituency.query.get(ward.constituency_id)
+        if con: created+=_create_contest_if_missing(election_id,"Member of County Assembly","ward",county=con.county_id,constituency=con.id,ward=ward.id)
+    return created
+
+@app.route("/admin/elections", methods=["GET","POST"])
+@admin_required
+def manage_elections():
+    user=current_user()
+    if request.method=="POST":
+        validate_csrf(); action=request.form.get("action")
+        if action=="select":
+            eid=request.form.get("election_id","")
+            target=ElectionSetting.query.get(int(eid)) if eid.isdigit() else None
+            if not target: flash("Election not found.","danger"); return redirect(url_for("manage_elections"))
+            ElectionSetting.query.update({ElectionSetting.is_current:False}); target.is_current=True; db.session.commit(); log_event("CURRENT_ELECTION_CHANGED","INFO",user.id,target.title); flash("Current election changed.","success"); return redirect(url_for("manage_elections"))
+        title=request.form.get("title","").strip()[:200]; etype=request.form.get("election_type"); d=request.form.get("election_date","")
+        try: edate=datetime.strptime(d,"%Y-%m-%d").date()
+        except ValueError: flash("Enter a valid election date.","danger"); return redirect(url_for("manage_elections"))
+        if not title or etype not in ("general","by_election"): flash("Enter a title and valid election type.","danger"); return redirect(url_for("manage_elections"))
+        if request.form.get("make_current")=="on": ElectionSetting.query.update({ElectionSetting.is_current:False})
+        e=ElectionSetting(title=title,election_type=etype,election_date=edate,is_open=False,results_visible=False,is_current=request.form.get("make_current")=="on"); db.session.add(e); db.session.flush()
+        created=0
+        if etype=="general": created=_build_general_election_contests(e.id)
+        else:
+            pos=request.form.get("position"); county=request.form.get("county_id",""); con=request.form.get("constituency_id",""); ward=request.form.get("ward_id",""); county=int(county) if county.isdigit() else None; con=int(con) if con.isdigit() else None; ward=int(ward) if ward.isdigit() else None
+            if pos not in POSITIONS: db.session.rollback(); flash("Select a valid by-election position.","danger"); return redirect(url_for("manage_elections"))
+            if pos=="President": scope="national"; county=con=ward=None
+            elif pos in ("Governor","Senator","Woman Representative"):
+                scope="county"; con=ward=None
+                if not county or not Region.query.filter_by(id=county,active=True).first(): db.session.rollback(); flash("Select a valid county.","danger"); return redirect(url_for("manage_elections"))
+            elif pos=="Member of Parliament":
+                scope="constituency"; ward=None; x=Constituency.query.get(con) if con else None
+                if not x or x.county_id!=county: db.session.rollback(); flash("Select a valid constituency.","danger"); return redirect(url_for("manage_elections"))
+            else:
+                scope="ward"; x=Constituency.query.get(con) if con else None; w=Ward.query.get(ward) if ward else None
+                if not x or x.county_id!=county or not w or w.constituency_id!=con: db.session.rollback(); flash("Select a valid ward.","danger"); return redirect(url_for("manage_elections"))
+            created=_create_contest_if_missing(e.id,pos,scope,county,con,ward)
+        db.session.commit(); log_event("ELECTION_CREATED","INFO",user.id,f"{title}; type={etype}; contests={created}"); flash(f"Election created with {created} contest(s). Voting starts CLOSED until you enable it from Admin.","success"); return redirect(url_for("manage_elections"))
+    elections=ElectionSetting.query.order_by(ElectionSetting.election_date.desc(),ElectionSetting.id.desc()).all(); counts={e.id:Contest.query.filter_by(election_id=e.id).count() for e in elections}
+    return render_template_string(ELECTIONS_RC7,elections=elections,contest_counts=counts,counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(),by_positions=POSITIONS)
+
 @app.route("/admin/contests", methods=["GET","POST"])
 @admin_required
 def manage_contests():
@@ -1979,18 +2066,19 @@ def manage_contests():
             constituency=Constituency.query.get(con) if con else None; ward_obj=Ward.query.get(ward) if ward else None
             if not county or not constituency or constituency.county_id != county or not ward_obj or ward_obj.constituency_id != con:
                 flash("Select a ward that belongs to the selected constituency and county.","danger"); return redirect(url_for("manage_contests"))
-        duplicate=Contest.query.filter_by(election_id=1,position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward).first()
+        election=get_election()
+        duplicate=Contest.query.filter_by(election_id=election.id,position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward).first()
         if duplicate:
             flash("That election contest already exists for this area.","warning"); return redirect(url_for("manage_contests"))
-        db.session.add(Contest(position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward)); db.session.commit()
+        db.session.add(Contest(election_id=election.id,position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward)); db.session.commit()
         user=current_user(); log_event("CONTEST_CREATED","INFO",user.id if user else None,f"{pos} — {scope}")
         flash("Contest created.","success"); return redirect(url_for("manage_contests"))
-    return render_template_string(CONTESTS_V3, positions=POSITIONS, counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(), contests=Contest.query.order_by(Contest.position,Contest.id).all(), area=contest_area_name)
+    return render_template_string(CONTESTS_V3, positions=POSITIONS, counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(), contests=Contest.query.filter_by(election_id=get_election().id).order_by(Contest.position,Contest.id).all(), area=contest_area_name)
 
 @app.route("/results")
 def results():
     election=get_election(); user=current_user(); is_admin=bool(user and user.role=="admin")
-    votes=Vote.query.order_by(Vote.id.asc()).all(); previous_hash=GENESIS_HASH
+    votes=Vote.query.filter_by(election_id=election.id).order_by(Vote.id.asc()).all(); previous_hash=GENESIS_HASH
     integrity_status="VALID"; verified_count=0; invalid_ballots=0; break_point=None
     contest_tallies={}; legacy_tally={}; verified_contest_ballots={}
     for v in votes:
@@ -2013,7 +2101,7 @@ def results():
         verified_count += 1; previous_hash=v.current_hash
 
     contest_results=[]
-    for contest in Contest.query.filter_by(active=True,election_id=1).order_by(Contest.position,Contest.id).all():
+    for contest in Contest.query.filter_by(active=True,election_id=election.id).order_by(Contest.position,Contest.id).all():
         candidates=candidates_for_contest(contest.id); tally=contest_tallies.get(contest.id,{})
         eligible=registered_voters_for_contest(contest); cast=verified_contest_ballots.get(contest.id,0)
         contest_results.append({"contest":contest,"area":contest_area_name(contest),"candidates":candidates,"tally":tally,
@@ -2082,7 +2170,7 @@ def admin_dashboard():
         election=election,
         election_open=election_is_open(election),
         registered_voters=User.query.filter(User.role != "admin").count(),
-        total_votes=Vote.query.count(),
+        total_votes=Vote.query.filter_by(election_id=election.id).count(),
         events=events,
     )
 
