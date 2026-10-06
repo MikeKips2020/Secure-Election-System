@@ -1257,7 +1257,30 @@ REGIONS_HTML = """
 {% endblock %}
 """
 
-GEOGRAPHY_V3 = """{% extends 'base.html' %}{% block content %}<h2>Counties, Constituencies & Wards</h2><div class='row g-4'><div class='col-md-6'><form method='post' class='card card-body'><input type='hidden' name='csrf_token' value='{{ csrf_token() }}'><input type='hidden' name='kind' value='constituency'><h4>Add Constituency</h4><select class='form-select mb-2' name='county_id'>{% for c in counties %}<option value='{{c.id}}'>{{c.name}}</option>{% endfor %}</select><input class='form-control mb-2' name='name' required placeholder='Constituency'><button class='btn btn-primary'>Add</button></form></div><div class='col-md-6'><form method='post' class='card card-body'><input type='hidden' name='csrf_token' value='{{ csrf_token() }}'><input type='hidden' name='kind' value='ward'><h4>Add Ward</h4><select class='form-select mb-2' name='constituency_id'>{% for x in constituencies %}<option value='{{x.id}}'>{{x.name}}</option>{% endfor %}</select><input class='form-control mb-2' name='name' required placeholder='Ward'><button class='btn btn-primary'>Add</button></form></div></div>{% endblock %}"""
+GEOGRAPHY_V3 = r"""{% extends 'base.html' %}{% block content %}
+<h2>Kenya Electoral Geography</h2>
+<p class="text-muted">Browse the verified reference hierarchy. Select a county, then a constituency to see only its wards.</p>
+<div class="row g-4 mb-4">
+ <div class="col-lg-7"><div class="card card-body">
+  <h4>Geography Browser</h4>
+  <label class="form-label">County</label><select id="geoCounty" class="form-select mb-3"><option value="">Select county</option>{% for c in counties %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select>
+  <label class="form-label">Constituency</label><select id="geoCon" class="form-select mb-3" disabled><option value="">Select county first</option></select>
+  <label class="form-label">Ward</label><select id="geoWard" class="form-select" disabled><option value="">Select constituency first</option></select>
+  <div id="geoStatus" class="small text-muted mt-3">Choose a county to browse its constituencies.</div>
+ </div></div>
+ <div class="col-lg-5"><div class="card card-body"><h4>Reference Data</h4><p><strong>{{county_count}}</strong> counties</p><p><strong>{{constituency_count}}</strong> constituencies</p><p><strong>{{ward_count}}</strong> wards</p><div class="alert alert-info mb-0">Imported geography is reference data. Manual additions are kept under Advanced Geography Administration.</div></div></div>
+</div>
+<details class="card card-body"><summary class="fw-bold">Advanced Geography Administration</summary><div class="row g-4 mt-1">
+ <div class="col-md-6"><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="constituency"><h5>Add Constituency</h5><select class="form-select mb-2" name="county_id" required><option value="">Select county</option>{% for c in counties %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select><input class="form-control mb-2" name="name" required placeholder="Constituency"><button class="btn btn-outline-primary">Add Constituency</button></form></div>
+ <div class="col-md-6"><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="ward"><h5>Add Ward</h5><select id="adminCounty" class="form-select mb-2"><option value="">Select county first</option>{% for c in counties %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select><select id="adminCon" class="form-select mb-2" name="constituency_id" required disabled><option value="">Select county first</option></select><input class="form-control mb-2" name="name" required placeholder="Ward"><button class="btn btn-outline-primary">Add Ward</button></form></div>
+</div></details>
+<script>
+async function getJSON(url){const r=await fetch(url); if(!r.ok) throw new Error('Unable to load geography'); return r.json();}
+const gc=document.getElementById('geoCounty'), gx=document.getElementById('geoCon'), gw=document.getElementById('geoWard'), gs=document.getElementById('geoStatus');
+gc.addEventListener('change', async()=>{gx.disabled=true; gw.disabled=true; gw.innerHTML='<option value="">Select constituency first</option>'; if(!gc.value){gx.innerHTML='<option value="">Select county first</option>';gs.textContent='Choose a county to browse its constituencies.';return;} const rows=await getJSON('/api/constituencies/'+gc.value); gx.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join(''); gx.disabled=false; gs.textContent=rows.length+' constituencies loaded for the selected county.';});
+gx.addEventListener('change', async()=>{gw.disabled=true;if(!gx.value){gw.innerHTML='<option value="">Select constituency first</option>';return;}const rows=await getJSON('/api/wards/'+gx.value);gw.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');gw.disabled=false;gs.textContent=rows.length+' wards loaded for the selected constituency.';});
+const ac=document.getElementById('adminCounty'), ax=document.getElementById('adminCon'); ac.addEventListener('change',async()=>{ax.disabled=true;if(!ac.value){ax.innerHTML='<option value="">Select county first</option>';return;}const rows=await getJSON('/api/constituencies/'+ac.value);ax.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ax.disabled=false;});
+</script>{% endblock %}"""
 
 CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}<h2>Election Contests</h2><p>President is national; Governor, Senator and Woman Representative are county contests; MP is constituency; MCA is ward.</p><form method='post' class='card card-body mb-4'><input type='hidden' name='csrf_token' value='{{ csrf_token() }}'><select class='form-select mb-2' name='position'>{% for p in positions %}<option>{{p}}</option>{% endfor %}</select><select class='form-select mb-2' name='county_id'><option value=''>County if applicable</option>{% for c in counties %}<option value='{{c.id}}'>{{c.name}}</option>{% endfor %}</select><select class='form-select mb-2' name='constituency_id'><option value=''>Constituency if applicable</option>{% for x in constituencies %}<option value='{{x.id}}'>{{x.name}}</option>{% endfor %}</select><select class='form-select mb-2' name='ward_id'><option value=''>Ward if applicable</option>{% for w in wards %}<option value='{{w.id}}'>{{w.name}}</option>{% endfor %}</select><button class='btn btn-primary'>Create Contest</button></form><table class='table'><tr><th>Position</th><th>Area</th></tr>{% for c in contests %}<tr><td>{{c.position}}</td><td>{{area(c)}}</td></tr>{% endfor %}</table>{% endblock %}"""
 
@@ -1716,7 +1739,8 @@ def manage_geography():
         elif kind=="ward" and request.form.get("constituency_id","").isdigit():
             db.session.add(Ward(name=name,constituency_id=int(request.form["constituency_id"])))
         db.session.commit(); flash("Electoral geography updated.","success"); return redirect(url_for("manage_geography"))
-    return render_template_string(GEOGRAPHY_V3, counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(), constituencies=Constituency.query.order_by(Constituency.name).all(), wards=Ward.query.order_by(Ward.name).all())
+    counties = Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all()
+    return render_template_string(GEOGRAPHY_V3, counties=counties, county_count=len(counties), constituency_count=Constituency.query.count(), ward_count=Ward.query.count())
 
 @app.route("/admin/contests", methods=["GET","POST"])
 @admin_required
