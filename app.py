@@ -1,5 +1,5 @@
 """
-Nairobi County Gubernatorial E-Voting Prototype
+Kenya Multi-Level Secure E-Voting Prototype — Advanced V3.1
 =================================================
 Single-file Flask application built for academic (Master's dissertation)
 demonstration purposes. Implements:
@@ -44,9 +44,13 @@ from sqlalchemy.exc import IntegrityError
 # ----------------------------------------------------------------------------
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
 _database_url = os.environ.get("DATABASE_URL", "sqlite:///evoting.db")
+_is_production = bool(os.environ.get("RENDER") or _database_url.startswith(("postgres://", "postgresql://")))
+_secret_key = os.environ.get("SECRET_KEY")
+if _is_production and not _secret_key:
+    raise RuntimeError("SECRET_KEY must be configured as a persistent environment variable in production.")
+app.secret_key = _secret_key or secrets.token_hex(32)
 
 # Render may supply postgres:// or postgresql://.
 # requirements.txt installs psycopg2-binary, so explicitly tell SQLAlchemy
@@ -68,15 +72,10 @@ db = SQLAlchemy(app)
 # --- AES (Fernet) key setup --------------------------------------------------
 _AES_KEY = os.environ.get("AES_KEY")
 if not _AES_KEY:
+    if _is_production:
+        raise RuntimeError("AES_KEY must be configured persistently in production; refusing to risk undecryptable ballots.")
     _AES_KEY = Fernet.generate_key().decode()
-    print("=" * 78)
-    print("[WARNING] AES_KEY environment variable not set.")
-    print("A temporary key was auto-generated for THIS PROCESS ONLY:")
-    print(f"  AES_KEY={_AES_KEY}")
-    print("Set this as a persistent environment variable, otherwise every")
-    print("restart generates a new key and previously cast votes become")
-    print("permanently undecryptable.")
-    print("=" * 78)
+    print("[DEV WARNING] AES_KEY is temporary. Do not use this local fallback for deployed voting data.")
 
 fernet = Fernet(_AES_KEY.encode() if isinstance(_AES_KEY, str) else _AES_KEY)
 
@@ -204,6 +203,9 @@ class User(db.Model):
     email_verification_token = db.Column(db.String(500), unique=True, nullable=True)
     email_verification_expires_at = db.Column(db.DateTime, nullable=True)
     role = db.Column(db.String(20), default="voter", nullable=False)
+    region_id = db.Column(db.Integer, nullable=True)
+    constituency_id = db.Column(db.Integer, nullable=True)
+    ward_id = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def set_password(self, raw_password):
@@ -220,7 +222,59 @@ class Candidate(db.Model):
     name = db.Column(db.String(150), nullable=False)
     party = db.Column(db.String(200), nullable=False)
     abbreviation = db.Column(db.String(10), nullable=False)
+    candidate_number = db.Column(db.String(20), nullable=True)
+    manifesto = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(20), nullable=False, default="active")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+
+class Region(db.Model):
+    __tablename__ = "regions"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    code = db.Column(db.String(30), nullable=True, unique=True)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class Constituency(db.Model):
+    __tablename__ = "constituencies"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(140), nullable=False)
+    county_id = db.Column(db.Integer, nullable=False)
+    active = db.Column(db.Boolean, default=True, nullable=False)
+
+class Ward(db.Model):
+    __tablename__ = "wards"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(140), nullable=False)
+    constituency_id = db.Column(db.Integer, nullable=False)
+    active = db.Column(db.Boolean, default=True, nullable=False)
+
+class Contest(db.Model):
+    __tablename__ = "contests"
+    id = db.Column(db.Integer, primary_key=True)
+    election_id = db.Column(db.Integer, default=1, nullable=False)
+    position = db.Column(db.String(50), nullable=False)
+    scope_level = db.Column(db.String(30), nullable=False)
+    county_id = db.Column(db.Integer, nullable=True)
+    constituency_id = db.Column(db.Integer, nullable=True)
+    ward_id = db.Column(db.Integer, nullable=True)
+    active = db.Column(db.Boolean, default=True, nullable=False)
+
+class ContestCandidate(db.Model):
+    __tablename__ = "contest_candidates"
+    id = db.Column(db.Integer, primary_key=True)
+    contest_id = db.Column(db.Integer, nullable=False)
+    candidate_id = db.Column(db.Integer, nullable=False)
+
+class BallotReceipt(db.Model):
+    __tablename__ = "ballot_receipts"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False)
+    contest_id = db.Column(db.Integer, nullable=False)
+    cast_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint("user_id", "contest_id", name="uq_voter_contest"),)
 
 class Vote(db.Model):
     __tablename__ = "votes"
@@ -230,6 +284,9 @@ class Vote(db.Model):
     previous_hash = db.Column(db.String(64), nullable=False)
     current_hash = db.Column(db.String(64), nullable=False)
     key_version = db.Column(db.String(40), default="v1", nullable=False)
+    region_id = db.Column(db.Integer, nullable=True)
+    election_id = db.Column(db.Integer, nullable=False, default=1)
+    contest_id = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -254,6 +311,14 @@ class AuditEvent(db.Model):
     user_id = db.Column(db.Integer, nullable=True)
     details = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AuditViewState(db.Model):
+    __tablename__ = "audit_view_states"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False, unique=True)
+    cleared_through_id = db.Column(db.Integer, nullable=False, default=0)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class PasswordResetToken(db.Model):
@@ -359,6 +424,40 @@ def compute_chain_hash(encrypted_vote_str, previous_hash):
     return hashlib.sha256(payload).hexdigest()
 
 
+def eligible_contests_for(user):
+    """Return active contests this voter is entitled to participate in."""
+    if not user or user.role == "admin":
+        return []
+    q = Contest.query.filter_by(active=True, election_id=1)
+    contests = []
+    for c in q.order_by(Contest.id).all():
+        if c.scope_level == "national":
+            contests.append(c)
+        elif c.scope_level == "county" and user.region_id and c.county_id == user.region_id:
+            contests.append(c)
+        elif c.scope_level == "constituency" and user.constituency_id and c.constituency_id == user.constituency_id:
+            contests.append(c)
+        elif c.scope_level == "ward" and user.ward_id and c.ward_id == user.ward_id:
+            contests.append(c)
+    return contests
+
+
+def candidates_for_contest(contest_id):
+    links = ContestCandidate.query.filter_by(contest_id=contest_id).all()
+    ids = [x.candidate_id for x in links]
+    if not ids:
+        return []
+    return Candidate.query.filter(Candidate.id.in_(ids), Candidate.status == "active").order_by(Candidate.id).all()
+
+
+def registered_voters_for_contest(contest):
+    q = User.query.filter(User.role != "admin")
+    if contest.scope_level == "county": q = q.filter(User.region_id == contest.county_id)
+    elif contest.scope_level == "constituency": q = q.filter(User.constituency_id == contest.constituency_id)
+    elif contest.scope_level == "ward": q = q.filter(User.ward_id == contest.ward_id)
+    return q.count()
+
+
 def generate_csrf_token():
     if "_csrf_token" not in session:
         session["_csrf_token"] = secrets.token_hex(16)
@@ -416,6 +515,12 @@ def migrate_database():
             connection.execute(text(
                 "ALTER TABLE users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'voter'"
             ))
+        if "region_id" not in existing_columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN region_id INTEGER"))
+        if "constituency_id" not in existing_columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN constituency_id INTEGER"))
+        if "ward_id" not in existing_columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN ward_id INTEGER"))
 
         connection.execute(text("""
             CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email_verification_token
@@ -430,18 +535,102 @@ def migrate_database():
                 "UPDATE users SET email_verified = TRUE WHERE email_verified = FALSE"
             ))
 
-    # Version 2 vote schema upgrade.
+    # Version 2.1 additive schema upgrades. Existing ballots are never rewritten.
     inspector = inspect(db.engine)
     if "votes" in inspector.get_table_names():
         vote_columns = {column["name"] for column in inspector.get_columns("votes")}
-        if "key_version" not in vote_columns:
-            with db.engine.begin() as connection:
+        with db.engine.begin() as connection:
+            if "key_version" not in vote_columns:
                 connection.execute(text(
                     "ALTER TABLE votes ADD COLUMN key_version VARCHAR(40) NOT NULL DEFAULT 'legacy'"
                 ))
+            if "region_id" not in vote_columns:
+                connection.execute(text("ALTER TABLE votes ADD COLUMN region_id INTEGER"))
+            if "election_id" not in vote_columns:
+                connection.execute(text(
+                    "ALTER TABLE votes ADD COLUMN election_id INTEGER NOT NULL DEFAULT 1"
+                ))
+            if "contest_id" not in vote_columns:
+                connection.execute(text("ALTER TABLE votes ADD COLUMN contest_id INTEGER"))
 
-    print("[INFO] Automatic database migration for Advanced Version 2 completed.")
+    inspector = inspect(db.engine)
+    if "candidates" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("candidates")}
+        with db.engine.begin() as connection:
+            if "candidate_number" not in cols:
+                connection.execute(text("ALTER TABLE candidates ADD COLUMN candidate_number VARCHAR(20)"))
+            if "manifesto" not in cols:
+                connection.execute(text("ALTER TABLE candidates ADD COLUMN manifesto TEXT"))
+            if "status" not in cols:
+                connection.execute(text(
+                    "ALTER TABLE candidates ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active'"
+                ))
+            if "created_at" not in cols:
+                connection.execute(text("ALTER TABLE candidates ADD COLUMN created_at TIMESTAMP"))
 
+    print("[INFO] Automatic database migration for Advanced Version 3.1.1 Release Candidate completed.")
+
+
+
+def seed_regions():
+    """Seed Kenya's 47 counties without altering existing ballots."""
+    names=['Baringo', 'Bomet', 'Bungoma', 'Busia', 'Elgeyo-Marakwet', 'Embu', 'Garissa', 'Homa Bay', 'Isiolo', 'Kajiado', 'Kakamega', 'Kericho', 'Kiambu', 'Kilifi', 'Kirinyaga', 'Kisii', 'Kisumu', 'Kitui', 'Kwale', 'Laikipia', 'Lamu', 'Machakos', 'Makueni', 'Mandera', 'Marsabit', 'Meru', 'Migori', 'Mombasa', "Murang'a", 'Nairobi', 'Nakuru', 'Nandi', 'Narok', 'Nyamira', 'Nyandarua', 'Nyeri', 'Samburu', 'Siaya', 'Taita-Taveta', 'Tana River', 'Tharaka-Nithi', 'Trans Nzoia', 'Turkana', 'Uasin Gishu', 'Vihiga', 'Wajir', 'West Pokot']
+    for i,name in enumerate(names, start=1):
+        r=Region.query.filter_by(name=name).first()
+        if not r:
+            db.session.add(Region(name=name, code=f"{i:03d}", active=True))
+        elif not r.code:
+            r.code=f"{i:03d}"
+    if not Region.query.filter_by(name="Legacy / Unassigned").first():
+        db.session.add(Region(name="Legacy / Unassigned", code="LEGACY", active=True))
+    db.session.commit()
+
+
+GEOGRAPHY_SOURCE_URL = "https://raw.githubusercontent.com/stevehoober254/kenya-county-data/main/county_data.json"
+
+def seed_kenya_electoral_geography(force=False):
+    """Load Kenya counties -> constituencies -> wards reference data.
+
+    The upstream structured dataset states that it is compiled from IEBC and
+    Kenyan government public data. V3.1 validates the expected national counts
+    (47 counties, 290 constituencies, 1,450 wards) before writing anything.
+    Existing rows are matched by parent + name and are never destructively reset.
+    """
+    if not force and Constituency.query.count() == 290 and Ward.query.count() == 1450:
+        return True, "Kenyan electoral geography already loaded (47 counties, 290 constituencies, 1,450 wards)."
+    try:
+        req=urllib.request.Request(GEOGRAPHY_SOURCE_URL, headers={"User-Agent":"MSc-EVoting-V3.1.1/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as response:
+            payload=json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return False, f"Reference-data download failed: {exc}"
+
+    if not isinstance(payload, list):
+        return False, "Reference-data format was not recognised."
+    county_count=len(payload)
+    constituency_count=sum(len(c.get("constituencies",[])) for c in payload)
+    ward_count=sum(len(x.get("wards",[])) for c in payload for x in c.get("constituencies",[]))
+    if (county_count, constituency_count, ward_count) != (47,290,1450):
+        return False, f"Safety check failed: source returned {county_count} counties, {constituency_count} constituencies and {ward_count} wards."
+
+    for county_data in payload:
+        cname=(county_data.get("name") or "").strip()
+        county=Region.query.filter(db.func.lower(Region.name)==cname.lower()).first()
+        if not county:
+            county=Region(name=cname, active=True)
+            db.session.add(county); db.session.flush()
+        for xdata in county_data.get("constituencies",[]):
+            xname=(xdata.get("name") or "").strip()
+            constituency=Constituency.query.filter_by(county_id=county.id, name=xname).first()
+            if not constituency:
+                constituency=Constituency(name=xname, county_id=county.id, active=True)
+                db.session.add(constituency); db.session.flush()
+            for wdata in xdata.get("wards",[]):
+                wname=(wdata.get("name") or "").strip()
+                if wname and not Ward.query.filter_by(constituency_id=constituency.id, name=wname).first():
+                    db.session.add(Ward(name=wname, constituency_id=constituency.id, active=True))
+    db.session.commit()
+    return True, "Loaded 47 counties, 290 constituencies and 1,450 wards."
 
 def seed_candidates():
     if Candidate.query.count() == 0:
@@ -455,6 +644,9 @@ with app.app_context():
     migrate_database()
     db.create_all()
     seed_candidates()
+    seed_regions()
+    geo_ok, geo_message = seed_kenya_electoral_geography()
+    print(f"[INFO] Kenya geography: {geo_message}")
     get_election()
     if ADMIN_EMAIL:
         admin_user = User.query.filter_by(email=ADMIN_EMAIL).first()
@@ -543,8 +735,8 @@ BASE_HTML = """
       {% if session.get('user_id') %}
         {% if current_user() and current_user().role == 'admin' %}
         <a class="btn btn-warning btn-sm" href="{{ url_for('admin_dashboard') }}">Admin</a>
-        {% elif not session.get('has_voted') %}
-        <a class="btn btn-emerald btn-sm" href="{{ url_for('vote') }}">Cast Vote</a>
+        {% else %}
+        <a class="btn btn-emerald btn-sm" href="{{ url_for('vote') }}">My Ballot</a>
         {% endif %}
         <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('logout') }}">Logout ({{ session.get('user_name') }})</a>
       {% else %}
@@ -636,9 +828,7 @@ HOME_HTML = """
         <a href="{{ url_for('register') }}" class="btn btn-emerald btn-lg">Register to Vote</a>
         <a href="{{ url_for('login') }}" class="btn btn-outline-parchment btn-lg">Login</a>
         {% else %}
-          {% if not session.get('has_voted') %}
-          <a href="{{ url_for('vote') }}" class="btn btn-emerald btn-lg">Cast Your Vote</a>
-          {% endif %}
+          <a href="{{ url_for('vote') }}" class="btn btn-emerald btn-lg">Open My Ballot</a>
         {% endif %}
         <a href="{{ url_for('results') }}" class="btn btn-outline-parchment btn-lg">View Live Audit</a>
       </div>
@@ -741,6 +931,21 @@ REGISTER_HTML = """
             <input type="text" class="form-control" name="national_id" pattern="\\d{7,8}" required value="{{ national_id or '' }}">
           </div>
           <div class="mb-3">
+            <label class="form-label">County</label>
+            <select class="form-select" name="region_id" id="countySelect" required>
+              <option value="">Select county</option>
+              {% for r in regions %}<option value="{{ r.id }}" {% if selected_region|string == r.id|string %}selected{% endif %}>{{ r.name }}</option>{% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Constituency</label>
+            <select class="form-select" name="constituency_id" id="constituencySelect" required disabled><option value="">Select county first</option></select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">County Assembly Ward</label>
+            <select class="form-select" name="ward_id" id="wardSelect" required disabled><option value="">Select constituency first</option></select>
+          </div>
+          <div class="mb-3">
             <label class="form-label">Password</label>
             <input type="password" class="form-control" name="password" minlength="8" required>
           </div>
@@ -751,6 +956,24 @@ REGISTER_HTML = """
     </div>
   </div>
 </div>
+
+<script>
+const county=document.getElementById('countySelect'), constituency=document.getElementById('constituencySelect'), ward=document.getElementById('wardSelect');
+async function loadConstituencies(selected=''){
+  constituency.innerHTML='<option value="">Loading...</option>'; constituency.disabled=true; ward.innerHTML='<option value="">Select constituency first</option>'; ward.disabled=true;
+  if(!county.value){ constituency.innerHTML='<option value="">Select county first</option>'; return; }
+  const rows=await fetch('/api/constituencies/'+county.value).then(r=>r.json());
+  constituency.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}" ${String(x.id)===String(selected)?'selected':''}>${x.name}</option>`).join(''); constituency.disabled=false;
+}
+async function loadWards(selected=''){
+  ward.innerHTML='<option value="">Loading...</option>'; ward.disabled=true;
+  if(!constituency.value){ ward.innerHTML='<option value="">Select constituency first</option>'; return; }
+  const rows=await fetch('/api/wards/'+constituency.value).then(r=>r.json());
+  ward.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}" ${String(x.id)===String(selected)?'selected':''}>${x.name}</option>`).join(''); ward.disabled=false;
+}
+county.addEventListener('change',()=>loadConstituencies()); constituency.addEventListener('change',()=>loadWards());
+{% if selected_region %}loadConstituencies('{{ selected_constituency or "" }}').then(()=>{% if selected_constituency %}loadWards('{{ selected_ward or "" }}'){% else %}null{% endif %});{% endif %}
+</script>
 {% endblock %}
 """
 
@@ -840,179 +1063,36 @@ RESET_PASSWORD_HTML = """
 VOTE_HTML = """
 {% extends "base.html" %}
 {% block content %}
-<div class="row justify-content-center">
-  <div class="col-md-7">
-    <div class="card">
-      <div class="card-body p-4">
-        <h3 class="mb-1">Cast Your Ballot</h3>
-        <p class="text-muted">Nairobi County Gubernatorial Election &mdash; select exactly one candidate.</p>
-        <form method="POST">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          {% for c in candidates %}
-          <div class="form-check border rounded p-3 mb-2">
-            <input class="form-check-input" type="radio" name="candidate_id" id="cand{{ c.id }}" value="{{ c.id }}" required>
-            <label class="form-check-label w-100" for="cand{{ c.id }}">
-              <strong>{{ c.name }}</strong><br>
-              <span class="text-muted">{{ c.party }} ({{ c.abbreviation }})</span>
-            </label>
-          </div>
-          {% endfor %}
-          <button type="submit" class="btn btn-success w-100 mt-3">Encrypt &amp; Submit Vote</button>
-        </form>
-      </div>
-    </div>
-  </div>
-</div>
+<div class="row justify-content-center"><div class="col-lg-9">
+<div class="card"><div class="card-body p-4">
+<h2>My General Election Ballot</h2>
+<p class="text-muted">You may vote once in each contest for which your registered County, Constituency and Ward make you eligible. Already-cast contests are locked.</p>
+{% if not contest_rows %}<div class="alert alert-warning">No active contests are configured for your registered electoral area yet.</div>{% endif %}
+<form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+{% for row in contest_rows %}
+<div class="card mb-3"><div class="card-body">
+<div class="d-flex justify-content-between"><div><h4 class="mb-0">{{ row.contest.position }}</h4><small class="text-muted">{{ row.area }}</small></div>{% if row.cast %}<span class="badge text-bg-success align-self-start">VOTE RECORDED</span>{% endif %}</div>
+{% if row.cast %}<p class="mt-3 mb-0 text-muted">This contest is locked. Your candidate choice is not stored in the receipt.</p>
+{% elif not row.candidates %}<div class="alert alert-warning mt-3 mb-0">No active candidates have been registered for this contest.</div>
+{% else %}{% for c in row.candidates %}<div class="form-check border rounded p-3 mt-2"><input class="form-check-input" type="radio" name="contest_{{ row.contest.id }}" id="c{{row.contest.id}}_{{c.id}}" value="{{c.id}}"><label class="form-check-label w-100" for="c{{row.contest.id}}_{{c.id}}"><strong>{{c.name}}</strong><br><span class="text-muted">{{c.party}} ({{c.abbreviation}})</span></label></div>{% endfor %}{% endif %}
+</div></div>{% endfor %}
+{% if open_count %}<button class="btn btn-success w-100">Encrypt & Submit Selected Contest Votes</button><p class="small text-muted mt-2">You do not need to vote in every remaining contest in one visit.</p>{% endif %}
+</form></div></div></div></div>
 {% endblock %}
 """
-
 RESULTS_HTML = """
-{% extends "base.html" %}
-{% block content %}
-
-<div class="card mb-4 border-0 shadow-sm">
-  <div class="card-body p-4">
-    {% if election_open %}
-      <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
-        <div>
-          <h2 class="mb-2">🟢 ELECTION OPEN</h2>
-          <p class="lead mb-2">Voting is currently in progress.</p>
-          <p class="mb-1"><strong>{{ total_votes }}</strong> ballot{{ '' if total_votes == 1 else 's' }} received.</p>
-          {% if not is_admin %}
-            <p class="text-muted mb-0">
-              Candidate results are hidden while polls are open to avoid influencing voters.
-            </p>
-          {% else %}
-            <p class="text-muted mb-0">
-              Administrator view: system integrity information is available below.
-            </p>
-          {% endif %}
-        </div>
-        <span class="badge text-bg-success fs-6">OPEN</span>
-      </div>
-    {% else %}
-      <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
-        <div>
-          <h2 class="mb-2">🔴 ELECTION CLOSED</h2>
-          <p class="lead mb-2">Voting has ended.</p>
-          <p class="mb-1"><strong>{{ total_votes }}</strong> ballot{{ '' if total_votes == 1 else 's' }} recorded.</p>
-          <p class="mb-1">
-            <strong>{{ verified_count }}/{{ total_votes }}</strong> ballots integrity checked/countable before any detected failure.
-          </p>
-          <p class="mb-0">
-            Final audit:
-            {% if integrity_status == "VALID" %}
-              <span class="badge text-bg-success">VALID</span>
-            {% elif integrity_status == "HASH_FAILURE" %}
-              <span class="badge text-bg-danger">HASH-CHAIN FAILURE</span>
-            {% else %}
-              <span class="badge text-bg-warning">DECRYPTION/KEY ERROR</span>
-            {% endif %}
-          </p>
-        </div>
-        <span class="badge text-bg-secondary fs-6">CLOSED</span>
-      </div>
-    {% endif %}
-  </div>
-</div>
-
-{% if show_candidate_results %}
-<div class="card mb-4">
-  <div class="card-body p-4">
-    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-      <div>
-        <h3 class="mb-1">Final Results</h3>
-        <div class="text-muted">{{ election.title }}</div>
-      </div>
-      <span class="badge {{ 'text-bg-success' if integrity_status == 'VALID' else 'text-bg-warning' }}">
-        Audit: {{ integrity_status.replace('_', ' ') }}
-      </span>
-    </div>
-
-    <hr>
-    <div class="row g-3">
-      <div class="col-md-3"><strong>{{ registered_voters }}</strong><br><span class="text-muted">Registered voters</span></div>
-      <div class="col-md-3"><strong>{{ total_votes }}</strong><br><span class="text-muted">Ballots recorded</span></div>
-      <div class="col-md-3"><strong>{{ verified_count }}</strong><br><span class="text-muted">Valid/decrypted</span></div>
-      <div class="col-md-3"><strong>{{ "%.1f"|format(turnout) }}%</strong><br><span class="text-muted">Turnout</span></div>
-    </div>
-
-    {% if integrity_status == "HASH_FAILURE" %}
-    <div class="alert alert-danger mt-3 mb-0">
-      The stored hash chain failed at vote ID <strong>{{ break_point }}</strong>.
-      Candidate totals below only include ballots safely processed before that point.
-    </div>
-    {% elif integrity_status == "DECRYPTION_FAILURE" %}
-    <div class="alert alert-warning mt-3 mb-0">
-      The hash chain is intact up to vote ID <strong>{{ break_point }}</strong>, but that ballot
-      could not be decrypted with the current encryption key. This is reported separately
-      from ledger tampering.
-    </div>
-    {% endif %}
-  </div>
-</div>
-
-<div class="card mb-4">
-  <div class="card-body p-4">
-    <h4>Vote Tally</h4>
-    {% set denom = verified_count if verified_count else 1 %}
-    {% for c in candidates %}
-      {% set n = tally.get(c.id, 0) %}
-      {% set pct = (100.0 * n / denom) %}
-      <div class="mb-3">
-        <div class="d-flex justify-content-between">
-          <span><strong>{{ c.name }}</strong> <span class="text-muted">({{ c.abbreviation }})</span></span>
-          <span>{{ n }} vote{{ '' if n == 1 else 's' }} — {{ "%.1f"|format(pct) }}%</span>
-        </div>
-        <div class="progress" role="progressbar" aria-valuenow="{{ pct }}" aria-valuemin="0" aria-valuemax="100">
-          <div class="progress-bar" style="width: {{ pct }}%"></div>
-        </div>
-      </div>
-    {% endfor %}
-    <div class="alert alert-secondary mb-0">
-      Spoilt / invalid / uncountable ballots: <strong>{{ invalid_ballots }}</strong>
-    </div>
-  </div>
-</div>
-
-{% elif election_open and is_admin %}
-<div class="card mb-4">
-  <div class="card-body p-4">
-    <h3>Administrator Integrity Monitor</h3>
-    <p class="text-muted">
-      Candidate totals remain suppressed while voting is open. This panel exposes operational
-      integrity information only.
-    </p>
-    <div class="row g-3">
-      <div class="col-md-4"><strong>{{ total_votes }}</strong><br><span class="text-muted">Ballots received</span></div>
-      <div class="col-md-4"><strong>{{ verified_count }}</strong><br><span class="text-muted">Ledger/decryption checks passed</span></div>
-      <div class="col-md-4">
-        <strong>{{ integrity_status.replace('_', ' ') }}</strong><br><span class="text-muted">Current audit status</span>
-      </div>
-    </div>
-  </div>
-</div>
-
+{% extends "base.html" %}{% block content %}
+<div class="card mb-4"><div class="card-body p-4"><div class="d-flex justify-content-between"><div><h2>{{ '🟢 ELECTION OPEN' if election_open else '🔴 ELECTION CLOSED' }}</h2><p class="mb-1"><strong>{{total_votes}}</strong> encrypted ballot records in the ledger.</p><p class="mb-0">Integrity: <span class="badge {{'text-bg-success' if integrity_status=='VALID' else 'text-bg-danger'}}">{{integrity_status.replace('_',' ')}}</span> &middot; {{verified_count}} verified</p></div><span class="badge {{'text-bg-success' if election_open else 'text-bg-secondary'}} align-self-start">{{'OPEN' if election_open else 'CLOSED'}}</span></div></div></div>
+{% if election_open %}<div class="alert alert-info">Candidate standings are hidden while polls are open.</div>
+{% elif not show_candidate_results %}<div class="alert alert-warning">Voting is closed, but the administrator has not released final results.</div>
 {% else %}
-<div class="card">
-  <div class="card-body p-4 text-center">
-    <h4>Results are not yet available</h4>
-    {% if election_open %}
-      <p class="mb-0 text-muted">
-        Final candidate results will be released after the election closes.
-      </p>
-    {% else %}
-      <p class="mb-0 text-muted">
-        The election has closed, but the administrator has not yet released the final results.
-      </p>
-    {% endif %}
-  </div>
-</div>
+<h3>Final Results by Contest</h3><p class="text-muted">Turnout is calculated separately for each contest, so it cannot exceed 100% merely because each voter has several ballot papers.</p>
+{% for r in contest_results %}<div class="card mb-3"><div class="card-body"><div class="d-flex justify-content-between flex-wrap"><div><h4 class="mb-0">{{r.contest.position}}</h4><span class="text-muted">{{r.area}}</span></div><div class="text-end"><strong>{{'%.1f'|format(r.turnout)}}%</strong> turnout<br><small>{{r.cast}} ballots / {{r.eligible}} eligible voters</small></div></div><hr>{% for c in r.candidates %}<div class="d-flex justify-content-between border-bottom py-2"><span><strong>{{c.name}}</strong> <small class="text-muted">{{c.party}} ({{c.abbreviation}})</small></span><strong>{{r.tally.get(c.id,0)}}</strong></div>{% else %}<p class="text-muted mb-0">No active candidates registered.</p>{% endfor %}</div></div>{% endfor %}
+{% if legacy_tally %}<div class="card border-warning mb-3"><div class="card-body"><h4>Legacy Demo Ballots</h4><p class="text-muted">These ballots pre-date V3 contest IDs and are preserved separately rather than being assigned to a constituency/ward contest retrospectively.</p>{% for cid,n in legacy_tally.items() %}<div>{{ legacy_candidates.get(cid).name if legacy_candidates.get(cid) else ('Candidate ID ' ~ cid) }}: <strong>{{n}}</strong></div>{% endfor %}</div></div>{% endif %}
 {% endif %}
-
+{% if integrity_status=='HASH_FAILURE' %}<div class="alert alert-danger">Hash-chain verification failed at vote ID {{break_point}}.</div>{% elif integrity_status=='DECRYPTION_FAILURE' %}<div class="alert alert-warning">Vote ID {{break_point}} could not be decrypted with the configured key. This is reported separately from hash-chain tampering.</div>{% endif %}
 {% endblock %}
 """
-
 ADMIN_HTML = """
 {% extends "base.html" %}
 {% block content %}
@@ -1022,6 +1102,13 @@ ADMIN_HTML = """
       <div class="card-body p-4">
         <h3>Administrator Dashboard</h3>
         <p class="text-muted">Election lifecycle and security controls.</p>
+        <div class="d-flex gap-2 flex-wrap mb-3">
+          <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_candidates') }}">Manage Candidates</a>
+          <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_regions') }}">Manage Counties</a>
+          <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_geography') }}">Constituencies & Wards</a>
+          <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_contests') }}">Election Contests</a>
+          <form method="POST" action="{{ url_for('reload_kenya_geography') }}" class="d-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-success btn-sm">Verify / Load Kenya Geography</button></form>
+        </div>
         <form method="POST">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="mb-3">
@@ -1059,7 +1146,15 @@ ADMIN_HTML = """
 
 <div class="card mt-4">
   <div class="card-body p-4">
-    <h4>Recent Security Audit Events</h4>
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+      <h4 class="mb-0">Recent Security Audit Events</h4>
+      <div class="d-flex gap-2">
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('full_audit_log') }}">View Full Audit Log</a>
+        <form method="POST" action="{{ url_for('clear_audit_view') }}" onsubmit="return confirm('Clear recent events from this dashboard view? The underlying audit records will NOT be deleted.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-sm btn-outline-secondary">Clear View</button>
+        </form>
+      </div>
+    </div>
     <div class="table-responsive">
       <table class="table table-sm">
         <thead><tr><th>Time</th><th>Event</th><th>Severity</th><th>User ID</th><th>Details</th></tr></thead>
@@ -1077,6 +1172,72 @@ ADMIN_HTML = """
 {% endblock %}
 """
 
+
+CANDIDATES_HTML = """
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-4">
+ <div class="col-lg-5"><div class="card"><div class="card-body p-4">
+  <h3>Candidate Registration</h3>
+  <form method="POST">
+   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+   <input type="hidden" name="action" value="add">
+   <div class="mb-3"><label class="form-label">Contest</label><select class="form-select" name="contest_id" required>{% for x in contests %}<option value="{{x.id}}">{{x.position}} — {{area(x)}}</option>{% endfor %}</select></div><div class="mb-3"><label class="form-label">Full name</label><input class="form-control" name="name" required></div>
+   <div class="mb-3"><label class="form-label">Political party</label><input class="form-control" name="party" required></div>
+   <div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" required></div>
+   <div class="col"><label class="form-label">Candidate number</label><input class="form-control" name="candidate_number"></div></div>
+   <div class="my-3"><label class="form-label">Short manifesto/profile</label><textarea class="form-control" name="manifesto" rows="4"></textarea></div>
+   <button class="btn btn-primary">Add Candidate</button>
+  </form>
+ </div></div></div>
+ <div class="col-lg-7"><div class="card"><div class="card-body p-4">
+  <h3>Registered Candidates</h3>
+  <table class="table"><thead><tr><th>Candidate</th><th>Party</th><th>Status</th><th></th></tr></thead><tbody>
+  {% for c in candidates %}<tr><td>{{ c.name }}</td><td>{{ c.party }} ({{ c.abbreviation }})</td>
+  <td>{{ c.status|upper }}</td><td><form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="{{ c.id }}">
+  <button class="btn btn-sm btn-outline-secondary">{{ 'Withdraw' if c.status == 'active' else 'Reactivate' }}</button></form></td></tr>{% endfor %}
+  </tbody></table>
+  <div class="alert alert-info small">Candidates are withdrawn rather than deleted, preserving existing ballot history.</div>
+ </div></div></div>
+</div>
+{% endblock %}
+"""
+
+REGIONS_HTML = """
+{% extends "base.html" %}
+{% block content %}
+<div class="row g-4">
+ <div class="col-lg-5"><div class="card"><div class="card-body p-4">
+  <h3>Add County</h3>
+  <form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="add">
+  <div class="mb-3"><label class="form-label">County</label><input class="form-control" name="name" required placeholder="e.g. Nairobi"></div>
+  <div class="mb-3"><label class="form-label">Code</label><input class="form-control" name="code" placeholder="e.g. NBI"></div>
+  <button class="btn btn-primary">Add Region</button></form>
+ </div></div></div>
+ <div class="col-lg-7"><div class="card"><div class="card-body p-4">
+  <h3>Kenyan Counties</h3><table class="table"><thead><tr><th>Region</th><th>Code</th><th>Status</th><th></th></tr></thead><tbody>
+  {% for r in regions %}<tr><td>{{ r.name }}</td><td>{{ r.code or '-' }}</td><td>{{ 'ACTIVE' if r.active else 'INACTIVE' }}</td>
+  <td>{% if r.code != 'LEGACY' %}<form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="toggle">
+  <input type="hidden" name="region_id" value="{{ r.id }}"><button class="btn btn-sm btn-outline-secondary">{{ 'Deactivate' if r.active else 'Activate' }}</button></form>{% endif %}</td></tr>{% endfor %}
+  </tbody></table>
+ </div></div></div>
+</div>
+{% endblock %}
+"""
+
+GEOGRAPHY_V3 = """{% extends 'base.html' %}{% block content %}<h2>Counties, Constituencies & Wards</h2><div class='row g-4'><div class='col-md-6'><form method='post' class='card card-body'><input type='hidden' name='csrf_token' value='{{ csrf_token() }}'><input type='hidden' name='kind' value='constituency'><h4>Add Constituency</h4><select class='form-select mb-2' name='county_id'>{% for c in counties %}<option value='{{c.id}}'>{{c.name}}</option>{% endfor %}</select><input class='form-control mb-2' name='name' required placeholder='Constituency'><button class='btn btn-primary'>Add</button></form></div><div class='col-md-6'><form method='post' class='card card-body'><input type='hidden' name='csrf_token' value='{{ csrf_token() }}'><input type='hidden' name='kind' value='ward'><h4>Add Ward</h4><select class='form-select mb-2' name='constituency_id'>{% for x in constituencies %}<option value='{{x.id}}'>{{x.name}}</option>{% endfor %}</select><input class='form-control mb-2' name='name' required placeholder='Ward'><button class='btn btn-primary'>Add</button></form></div></div>{% endblock %}"""
+
+CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}<h2>Election Contests</h2><p>President is national; Governor, Senator and Woman Representative are county contests; MP is constituency; MCA is ward.</p><form method='post' class='card card-body mb-4'><input type='hidden' name='csrf_token' value='{{ csrf_token() }}'><select class='form-select mb-2' name='position'>{% for p in positions %}<option>{{p}}</option>{% endfor %}</select><select class='form-select mb-2' name='county_id'><option value=''>County if applicable</option>{% for c in counties %}<option value='{{c.id}}'>{{c.name}}</option>{% endfor %}</select><select class='form-select mb-2' name='constituency_id'><option value=''>Constituency if applicable</option>{% for x in constituencies %}<option value='{{x.id}}'>{{x.name}}</option>{% endfor %}</select><select class='form-select mb-2' name='ward_id'><option value=''>Ward if applicable</option>{% for w in wards %}<option value='{{w.id}}'>{{w.name}}</option>{% endfor %}</select><button class='btn btn-primary'>Create Contest</button></form><table class='table'><tr><th>Position</th><th>Area</th></tr>{% for c in contests %}<tr><td>{{c.position}}</td><td>{{area(c)}}</td></tr>{% endfor %}</table>{% endblock %}"""
+
+AUDIT_LOG_HTML = """
+{% extends "base.html" %}{% block content %}
+<div class="card"><div class="card-body p-4"><div class="d-flex justify-content-between"><div><h2>Full Security Audit Log</h2><p class="text-muted">Immutable application audit history. Dashboard Clear View does not delete these records.</p></div><a class="btn btn-outline-secondary align-self-start" href="{{ url_for('admin_dashboard') }}">Back to Admin</a></div>
+<form class="row g-2 mb-3" method="GET"><div class="col-md-4"><input class="form-control" name="event" value="{{ event_filter }}" placeholder="Event type contains..."></div><div class="col-md-3"><select class="form-select" name="severity"><option value="">All severities</option>{% for s in ['INFO','WARNING','ERROR','CRITICAL'] %}<option {% if severity_filter==s %}selected{% endif %}>{{s}}</option>{% endfor %}</select></div><div class="col"><button class="btn btn-primary">Filter</button> <a class="btn btn-outline-secondary" href="{{ url_for('full_audit_log') }}">Reset</a></div></form>
+<div class="table-responsive"><table class="table table-sm"><thead><tr><th>Time</th><th>Event</th><th>Severity</th><th>User ID</th><th>Details</th></tr></thead><tbody>{% for e in events %}<tr><td>{{e.created_at}}</td><td>{{e.event_type}}</td><td>{{e.severity}}</td><td>{{e.user_id or '-'}}</td><td>{{e.details or ''}}</td></tr>{% else %}<tr><td colspan="5">No matching events.</td></tr>{% endfor %}</tbody></table></div>
+</div></div>{% endblock %}
+"""
+
 app.jinja_loader = DictLoader({
     "base.html": BASE_HTML,
     "home.html": HOME_HTML,
@@ -1087,6 +1248,11 @@ app.jinja_loader = DictLoader({
     "vote.html": VOTE_HTML,
     "results.html": RESULTS_HTML,
     "admin.html": ADMIN_HTML,
+    "audit_log.html": AUDIT_LOG_HTML,
+    "candidates.html": CANDIDATES_HTML,
+    "regions.html": REGIONS_HTML,
+    "geography_v3.html": GEOGRAPHY_V3,
+    "contests_v3.html": CONTESTS_V3,
 })
 
 
@@ -1099,82 +1265,53 @@ def home():
     return render_template_string(HOME_HTML)
 
 
+@app.route("/api/constituencies/<int:county_id>")
+def api_constituencies(county_id):
+    rows=Constituency.query.filter_by(county_id=county_id, active=True).order_by(Constituency.name).all()
+    return app.response_class(json.dumps([{"id":x.id,"name":x.name} for x in rows]), mimetype="application/json")
+
+@app.route("/api/wards/<int:constituency_id>")
+def api_wards(constituency_id):
+    rows=Ward.query.filter_by(constituency_id=constituency_id, active=True).order_by(Ward.name).all()
+    return app.response_class(json.dumps([{"id":w.id,"name":w.name} for w in rows]), mimetype="application/json")
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
+    regions=Region.query.filter(Region.active.is_(True), Region.code != "LEGACY").order_by(Region.name).all()
+    selected_region=selected_constituency=selected_ward=""
     if request.method == "POST":
         validate_csrf()
-
-        full_name = request.form.get("full_name", "").strip()
-        email = request.form.get("email", "").strip().lower()
-        national_id = request.form.get("national_id", "").strip()
-        password = request.form.get("password", "")
-
-        errors = []
-        if not full_name:
-            errors.append("Full name is required.")
-        if not EMAIL_REGEX.match(email):
-            errors.append("A valid email address is required.")
-        if not NATIONAL_ID_REGEX.match(national_id):
-            errors.append("National ID must be 7 to 8 numeric digits.")
-        if len(password) < 8:
-            errors.append("Password must be at least 8 characters long.")
-
-        if not errors:
-            if User.query.filter_by(email=email).first():
-                errors.append("An account with this email already exists.")
-            if User.query.filter_by(national_id=national_id).first():
-                errors.append("This National ID is already registered (one voter, one registration).")
-
+        full_name=request.form.get("full_name","").strip(); email=request.form.get("email","").strip().lower()
+        national_id=request.form.get("national_id","").strip(); password=request.form.get("password","")
+        selected_region=request.form.get("region_id","").strip(); selected_constituency=request.form.get("constituency_id","").strip(); selected_ward=request.form.get("ward_id","").strip()
+        region=Region.query.get(int(selected_region)) if selected_region.isdigit() else None
+        constituency=Constituency.query.get(int(selected_constituency)) if selected_constituency.isdigit() else None
+        ward=Ward.query.get(int(selected_ward)) if selected_ward.isdigit() else None
+        errors=[]
+        if not full_name: errors.append("Full name is required.")
+        if not EMAIL_REGEX.match(email): errors.append("A valid email address is required.")
+        if not NATIONAL_ID_REGEX.match(national_id): errors.append("National ID must be 7 to 8 numeric digits.")
+        if len(password)<8: errors.append("Password must be at least 8 characters long.")
+        if not region or not region.active or region.code=="LEGACY": errors.append("Please select a valid county.")
+        if not constituency or not region or constituency.county_id != region.id: errors.append("Please select a constituency within your county.")
+        if not ward or not constituency or ward.constituency_id != constituency.id: errors.append("Please select a ward within your constituency.")
+        if not errors and User.query.filter_by(email=email).first(): errors.append("An account with this email already exists.")
+        if not errors and User.query.filter_by(national_id=national_id).first(): errors.append("This National ID is already registered (one voter, one registration).")
         if errors:
-            for e in errors:
-                flash(e, "danger")
-            return render_template_string(
-                REGISTER_HTML, full_name=full_name, email=email, national_id=national_id
-            )
-
-        verification_token = secrets.token_urlsafe(48)
-        user = User(
-            full_name=full_name,
-            email=email,
-            national_id=national_id,
-            email_verified=False,
-            email_verification_token=verification_token,
-            email_verification_expires_at=(
-                datetime.utcnow() + timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE_SECONDS)
-            ),
-        )
+            for e in errors: flash(e,"danger")
+            return render_template_string(REGISTER_HTML,full_name=full_name,email=email,national_id=national_id,regions=regions,selected_region=selected_region,selected_constituency=selected_constituency,selected_ward=selected_ward)
+        token=secrets.token_urlsafe(48)
+        user=User(full_name=full_name,email=email,national_id=national_id,region_id=region.id,constituency_id=constituency.id,ward_id=ward.id,email_verified=False,email_verification_token=token,email_verification_expires_at=datetime.utcnow()+timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE_SECONDS))
         user.set_password(password)
-
-        try:
-            db.session.add(user)
-            db.session.commit()
+        try: db.session.add(user); db.session.commit()
         except IntegrityError:
-            db.session.rollback()
-            flash("Email or National ID already registered.", "danger")
-            return render_template_string(
-                REGISTER_HTML, full_name=full_name, email=email, national_id=national_id
-            )
-
-        verification_url = url_for(
-            "verify_email", token=verification_token, _external=True
-        )
-
-        if send_email_verification_email(user.email, verification_url):
-            flash(
-                "Registration successful. Please check your email and click the "
-                "verification link before logging in.",
-                "success",
-            )
-        else:
-            flash(
-                "Registration was created, but the verification email could not be "
-                "sent. Please use the resend verification option.",
-                "warning",
-            )
-
+            db.session.rollback(); flash("Email or National ID already registered.","danger")
+            return render_template_string(REGISTER_HTML,regions=regions,selected_region=selected_region,selected_constituency=selected_constituency,selected_ward=selected_ward)
+        verification_url=url_for("verify_email",token=token,_external=True)
+        if send_email_verification_email(user.email,verification_url): flash("Registration successful. Please check your email and click the verification link before logging in.","success")
+        else: flash("Registration was created, but the verification email could not be sent. Please use the resend verification option.","warning")
         return redirect(url_for("login"))
-
-    return render_template_string(REGISTER_HTML)
+    return render_template_string(REGISTER_HTML,regions=regions,selected_region="",selected_constituency="",selected_ward="")
 
 
 @app.route("/verify-email/<token>")
@@ -1390,152 +1527,233 @@ def reset_password(token):
 @login_required
 def vote():
     user = current_user()
-    if user is None:
-        session.clear()
-        return redirect(url_for("login"))
-
+    if not user:
+        session.clear(); return redirect(url_for("login"))
     election = get_election()
     if not election_is_open(election):
-        flash("Voting is currently closed for this election.", "warning")
-        return redirect(url_for("results"))
+        flash("Voting is currently closed for this election.", "warning"); return redirect(url_for("results"))
 
-    if user.has_voted:
-        log_event("DUPLICATE_VOTE_BLOCKED", "WARNING", user.id, "Duplicate voting attempt blocked")
-        flash("You have already cast your vote. Duplicate voting is not permitted.", "warning")
-        return redirect(url_for("results"))
-
-    candidates = Candidate.query.order_by(Candidate.id).all()
-
+    contests = eligible_contests_for(user)
     if request.method == "POST":
         validate_csrf()
-
-        # Re-check DB state right before writing, to close the race window
-        # between page render and submission (defence in depth).
-        fresh_user = User.query.get(user.id)
-        if fresh_user.has_voted:
-            flash("You have already cast your vote.", "warning")
-            return redirect(url_for("results"))
-
-        try:
-            candidate_id = int(request.form.get("candidate_id", ""))
-        except (TypeError, ValueError):
-            flash("Please select a valid candidate.", "danger")
-            return render_template_string(VOTE_HTML, candidates=candidates)
-
-        candidate = Candidate.query.get(candidate_id)
-        if not candidate:
-            flash("Please select a valid candidate.", "danger")
-            return render_template_string(VOTE_HTML, candidates=candidates)
-
-        ballot_payload = json.dumps({
-            "candidate_id": candidate.id,
-            "cast_at": datetime.utcnow().isoformat(),
-            "nonce": secrets.token_hex(8),  # prevents identical ciphertexts for same candidate
-        })
-        encrypted_bytes = fernet.encrypt(ballot_payload.encode("utf-8"))
-        encrypted_str = encrypted_bytes.decode("utf-8")
-
-        previous_hash = get_last_vote_hash()
-        current_hash = compute_chain_hash(encrypted_str, previous_hash)
-
-        new_vote = Vote(
-            encrypted_vote=encrypted_str,
-            previous_hash=previous_hash,
-            current_hash=current_hash,
-            key_version=os.environ.get("AES_KEY_VERSION", "v1"),
-        )
+        selected = []
+        for contest in contests:
+            raw = request.form.get(f"contest_{contest.id}", "").strip()
+            if not raw: continue
+            if BallotReceipt.query.filter_by(user_id=user.id, contest_id=contest.id).first():
+                continue
+            if not raw.isdigit():
+                flash(f"Invalid candidate selection for {contest.position}.", "danger"); return redirect(url_for("vote"))
+            candidate_id = int(raw)
+            link = ContestCandidate.query.filter_by(contest_id=contest.id, candidate_id=candidate_id).first()
+            candidate = Candidate.query.get(candidate_id)
+            if not link or not candidate or candidate.status != "active":
+                flash(f"Candidate is not eligible for the {contest.position} contest.", "danger"); return redirect(url_for("vote"))
+            selected.append((contest, candidate))
+        if not selected:
+            flash("Select at least one candidate in an uncast contest.", "warning"); return redirect(url_for("vote"))
 
         try:
-            db.session.add(new_vote)
-            fresh_user.has_voted = True
+            previous_hash = get_last_vote_hash()
+            for contest, candidate in selected:
+                # The receipt proves participation in a contest but deliberately contains no candidate choice.
+                db.session.add(BallotReceipt(user_id=user.id, contest_id=contest.id))
+                payload = json.dumps({
+                    "candidate_id": candidate.id, "contest_id": contest.id, "election_id": contest.election_id,
+                    "scope_level": contest.scope_level, "county_id": user.region_id,
+                    "constituency_id": user.constituency_id, "ward_id": user.ward_id,
+                    "cast_at": datetime.utcnow().isoformat(), "nonce": secrets.token_hex(16),
+                }, separators=(",", ":"))
+                encrypted_str = fernet.encrypt(payload.encode()).decode()
+                current_hash = compute_chain_hash(encrypted_str, previous_hash)
+                db.session.add(Vote(encrypted_vote=encrypted_str, previous_hash=previous_hash,
+                    current_hash=current_hash, key_version=os.environ.get("AES_KEY_VERSION", "v1"),
+                    region_id=user.region_id, election_id=contest.election_id, contest_id=contest.id))
+                previous_hash = current_hash
             db.session.commit()
-        except Exception:
-            db.session.rollback()
-            flash("An error occurred while recording your vote. Please try again.", "danger")
-            return render_template_string(VOTE_HTML, candidates=candidates)
+        except IntegrityError:
+            db.session.rollback(); log_event("DUPLICATE_CONTEST_VOTE_BLOCKED", "WARNING", user.id, "Unique voter/contest receipt blocked duplicate submission")
+            flash("One of those contests has already been voted. No duplicate vote was recorded.", "warning"); return redirect(url_for("vote"))
+        except Exception as exc:
+            db.session.rollback(); log_event("BALLOT_WRITE_FAILURE", "ERROR", user.id, str(exc))
+            flash("The ballot could not be recorded. No partial submission was committed.", "danger"); return redirect(url_for("vote"))
+        log_event("VOTE_CAST", "INFO", user.id, f"Recorded {len(selected)} contest ballot(s); choices remain encrypted")
+        flash(f"Successfully recorded {len(selected)} encrypted contest vote(s).", "success")
+        return redirect(url_for("vote"))
 
-        session["has_voted"] = True
-        log_event("VOTE_CAST", "INFO", user.id, "Ballot encrypted and added to hash-chain ledger")
-        flash("Your vote was encrypted, hash-chained, and recorded successfully.", "success")
-        return redirect(url_for("results"))
+    receipts = {r.contest_id for r in BallotReceipt.query.filter_by(user_id=user.id).all()}
+    rows=[]
+    for c in contests:
+        rows.append({"contest":c,"area":contest_area_name(c),"candidates":candidates_for_contest(c.id),"cast":c.id in receipts})
+    return render_template_string(VOTE_HTML, contest_rows=rows, open_count=sum(1 for r in rows if not r["cast"] and r["candidates"]))
 
-    return render_template_string(VOTE_HTML, candidates=candidates)
 
+@app.route("/admin/candidates", methods=["GET", "POST"])
+@admin_required
+def manage_candidates():
+    user = current_user()
+    if request.method == "POST":
+        validate_csrf()
+        action = request.form.get("action")
+        if action == "add":
+            name = request.form.get("name", "").strip()
+            party = request.form.get("party", "").strip()
+            abbr = request.form.get("abbreviation", "").strip().upper()
+            if name and party and abbr:
+                c = Candidate(name=name, party=party, abbreviation=abbr,
+                              candidate_number=request.form.get("candidate_number", "").strip() or None,
+                              manifesto=request.form.get("manifesto", "").strip() or None,
+                              status="active")
+                db.session.add(c); db.session.flush()
+                cr=request.form.get("contest_id","")
+                if not cr.isdigit() or not Contest.query.get(int(cr)):
+                    db.session.rollback(); flash("Select a valid election contest for the candidate.", "danger"); return redirect(url_for("manage_candidates"))
+                db.session.add(ContestCandidate(contest_id=int(cr),candidate_id=c.id))
+                db.session.commit()
+                log_event("CANDIDATE_CREATED", "WARNING", user.id, f"{c.id}: {c.name}")
+                flash("Candidate added.", "success")
+                return redirect(url_for("manage_candidates"))
+            flash("Name, party and abbreviation are required.", "danger")
+        elif action == "toggle":
+            cid = request.form.get("candidate_id", "")
+            c = Candidate.query.get(int(cid)) if cid.isdigit() else None
+            if c:
+                c.status = "withdrawn" if c.status == "active" else "active"
+                db.session.commit()
+                log_event("CANDIDATE_STATUS_CHANGED", "WARNING", user.id, f"{c.id}: {c.status}")
+                flash("Candidate status updated.", "success")
+                return redirect(url_for("manage_candidates"))
+    return render_template_string(CANDIDATES_HTML, candidates=Candidate.query.order_by(Candidate.id).all(), contests=Contest.query.filter_by(active=True).all(), area=contest_area_name)
+
+
+@app.route("/admin/regions", methods=["GET", "POST"])
+@admin_required
+def manage_regions():
+    user = current_user()
+    if request.method == "POST":
+        validate_csrf()
+        action = request.form.get("action")
+        if action == "add":
+            name = request.form.get("name", "").strip()
+            short_code = request.form.get("code", "").strip().upper() or None
+            if name and not Region.query.filter(db.func.lower(Region.name) == name.lower()).first():
+                r = Region(name=name, code=short_code, active=True)
+                db.session.add(r); db.session.commit()
+                log_event("REGION_CREATED", "WARNING", user.id, f"{r.id}: {r.name}")
+                flash("County added.", "success")
+                return redirect(url_for("manage_regions"))
+            flash("Enter a unique region name.", "danger")
+        elif action == "toggle":
+            rid = request.form.get("region_id", "")
+            r = Region.query.get(int(rid)) if rid.isdigit() else None
+            if r and r.code != "LEGACY":
+                r.active = not r.active
+                db.session.commit()
+                log_event("REGION_STATUS_CHANGED", "WARNING", user.id, f"{r.id}: active={r.active}")
+                flash("County status updated.", "success")
+                return redirect(url_for("manage_regions"))
+    return render_template_string(REGIONS_HTML, regions=Region.query.order_by(Region.name).all())
+
+
+POSITIONS = ["President", "Governor", "Senator", "Woman Representative", "Member of Parliament", "Member of County Assembly"]
+
+def contest_area_name(c):
+    if c.scope_level == "national": return "Kenya — National"
+    if c.scope_level == "county":
+        x=Region.query.get(c.county_id); return (x.name+" County") if x else "County"
+    if c.scope_level == "constituency":
+        x=Constituency.query.get(c.constituency_id); return x.name if x else "Constituency"
+    x=Ward.query.get(c.ward_id); return x.name if x else "Ward"
+
+@app.route("/admin/geography", methods=["GET","POST"])
+@admin_required
+def manage_geography():
+    if request.method=="POST":
+        validate_csrf(); kind=request.form.get("kind"); name=request.form.get("name","").strip()
+        if kind=="constituency" and request.form.get("county_id","").isdigit():
+            db.session.add(Constituency(name=name,county_id=int(request.form["county_id"])))
+        elif kind=="ward" and request.form.get("constituency_id","").isdigit():
+            db.session.add(Ward(name=name,constituency_id=int(request.form["constituency_id"])))
+        db.session.commit(); flash("Electoral geography updated.","success"); return redirect(url_for("manage_geography"))
+    return render_template_string(GEOGRAPHY_V3, counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(), constituencies=Constituency.query.order_by(Constituency.name).all(), wards=Ward.query.order_by(Ward.name).all())
+
+@app.route("/admin/contests", methods=["GET","POST"])
+@admin_required
+def manage_contests():
+    if request.method=="POST":
+        validate_csrf(); pos=request.form.get("position"); county=request.form.get("county_id",""); con=request.form.get("constituency_id",""); ward=request.form.get("ward_id","")
+        county=int(county) if county.isdigit() else None; con=int(con) if con.isdigit() else None; ward=int(ward) if ward.isdigit() else None
+        if pos=="President": scope="national"; county=con=ward=None
+        elif pos in ("Governor","Senator","Woman Representative"): scope="county"
+        elif pos=="Member of Parliament": scope="constituency"
+        else: scope="ward"
+        db.session.add(Contest(position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward)); db.session.commit(); flash("Contest created.","success"); return redirect(url_for("manage_contests"))
+    return render_template_string(CONTESTS_V3, positions=POSITIONS, counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(), constituencies=Constituency.query.all(), wards=Ward.query.all(), contests=Contest.query.all(), area=contest_area_name)
 
 @app.route("/results")
 def results():
-    election = get_election()
-    user = current_user()
-    is_admin = bool(user and user.role == "admin")
-
-    # Public users can always see election status and ballot count.
-    # Candidate standings are never exposed while polls are open.
-    candidates = Candidate.query.order_by(Candidate.id).all()
-    votes = Vote.query.order_by(Vote.id.asc()).all()
-
-    tally = {c.id: 0 for c in candidates}
-    previous_hash = GENESIS_HASH
-    integrity_status = "VALID"
-    verified_count = 0
-    invalid_ballots = 0
-    break_point = None
-
+    election=get_election(); user=current_user(); is_admin=bool(user and user.role=="admin")
+    votes=Vote.query.order_by(Vote.id.asc()).all(); previous_hash=GENESIS_HASH
+    integrity_status="VALID"; verified_count=0; invalid_ballots=0; break_point=None
+    contest_tallies={}; legacy_tally={}; verified_contest_ballots={}
     for v in votes:
-        expected_hash = compute_chain_hash(v.encrypted_vote, previous_hash)
-
-        if v.previous_hash != previous_hash or v.current_hash != expected_hash:
-            integrity_status = "HASH_FAILURE"
-            break_point = v.id
-            invalid_ballots = len(votes) - verified_count
-            log_event("HASH_CHAIN_FAILURE", "CRITICAL", None, f"Ledger mismatch at vote ID {v.id}")
-            break
-
+        expected=compute_chain_hash(v.encrypted_vote, previous_hash)
+        if v.previous_hash != previous_hash or v.current_hash != expected:
+            integrity_status="HASH_FAILURE"; break_point=v.id; invalid_ballots=len(votes)-verified_count
+            log_event("HASH_CHAIN_FAILURE","CRITICAL",None,f"Ledger mismatch at vote ID {v.id}"); break
         try:
-            decrypted = fernet.decrypt(v.encrypted_vote.encode("utf-8"))
-            data = json.loads(decrypted.decode("utf-8"))
-            cand_id = data.get("candidate_id")
-            if cand_id in tally:
-                tally[cand_id] += 1
+            data=json.loads(fernet.decrypt(v.encrypted_vote.encode()).decode())
+            cid=data.get("candidate_id"); contest_id=data.get("contest_id") or getattr(v,"contest_id",None)
+            if contest_id:
+                contest_tallies.setdefault(contest_id,{})
+                contest_tallies[contest_id][cid]=contest_tallies[contest_id].get(cid,0)+1
+                verified_contest_ballots[contest_id]=verified_contest_ballots.get(contest_id,0)+1
             else:
-                invalid_ballots += 1
-        except (InvalidToken, ValueError, json.JSONDecodeError):
-            integrity_status = "DECRYPTION_FAILURE"
-            break_point = v.id
-            invalid_ballots = len(votes) - verified_count
-            log_event(
-                "BALLOT_DECRYPTION_FAILURE",
-                "ERROR",
-                None,
-                f"Vote ID {v.id}; key version={getattr(v, 'key_version', 'unknown')}"
-            )
-            break
+                legacy_tally[cid]=legacy_tally.get(cid,0)+1
+        except (InvalidToken,ValueError,json.JSONDecodeError):
+            integrity_status="DECRYPTION_FAILURE"; break_point=v.id; invalid_ballots=len(votes)-verified_count
+            log_event("BALLOT_DECRYPTION_FAILURE","ERROR",None,f"Vote ID {v.id}; key version={getattr(v,'key_version','unknown')}"); break
+        verified_count += 1; previous_hash=v.current_hash
 
-        verified_count += 1
-        previous_hash = v.current_hash
+    contest_results=[]
+    for contest in Contest.query.filter_by(active=True,election_id=1).order_by(Contest.position,Contest.id).all():
+        candidates=candidates_for_contest(contest.id); tally=contest_tallies.get(contest.id,{})
+        eligible=registered_voters_for_contest(contest); cast=verified_contest_ballots.get(contest.id,0)
+        contest_results.append({"contest":contest,"area":contest_area_name(contest),"candidates":candidates,"tally":tally,
+            "eligible":eligible,"cast":cast,"turnout":(100.0*cast/eligible if eligible else 0.0)})
+    legacy_candidates={c.id:c for c in Candidate.query.filter(Candidate.id.in_(list(legacy_tally.keys()) or [-1])).all()}
+    return render_template_string(RESULTS_HTML, election=election,election_open=election_is_open(election),is_admin=is_admin,
+        show_candidate_results=((not election_is_open(election)) and election.results_visible),total_votes=len(votes),verified_count=verified_count,
+        invalid_ballots=invalid_ballots,break_point=break_point,integrity_status=integrity_status,contest_results=contest_results,
+        legacy_tally=legacy_tally,legacy_candidates=legacy_candidates)
 
-    registered_voters = User.query.filter(User.role != "admin").count()
-    turnout = (100.0 * len(votes) / registered_voters) if registered_voters else 0.0
 
-    return render_template_string(
-        RESULTS_HTML,
-        candidates=candidates,
-        tally=tally,
-        integrity_status=integrity_status,
-        total_votes=len(votes),
-        verified_count=verified_count,
-        invalid_ballots=invalid_ballots,
-        break_point=break_point,
-        registered_voters=registered_voters,
-        turnout=turnout,
-        election=election,
-        election_open=election_is_open(election),
-        is_admin=is_admin,
-        show_candidate_results=(
-            (not election_is_open(election))
-            and election.results_visible
-        ),
-    )
+@app.route("/admin/audit/clear-view", methods=["POST"])
+@admin_required
+def clear_audit_view():
+    validate_csrf(); user=current_user(); latest=AuditEvent.query.order_by(AuditEvent.id.desc()).first()
+    state=AuditViewState.query.filter_by(user_id=user.id).first()
+    if not state: state=AuditViewState(user_id=user.id); db.session.add(state)
+    state.cleared_through_id=latest.id if latest else 0; db.session.commit()
+    log_event("AUDIT_DASHBOARD_VIEW_CLEARED","INFO",user.id,"Dashboard view cleared; audit records retained")
+    flash("Recent audit view cleared. Full audit records were retained.","success"); return redirect(url_for("admin_dashboard"))
 
+@app.route("/admin/audit")
+@admin_required
+def full_audit_log():
+    event_filter=request.args.get("event","").strip(); severity_filter=request.args.get("severity","").strip().upper()
+    q=AuditEvent.query
+    if event_filter: q=q.filter(AuditEvent.event_type.ilike(f"%{event_filter}%"))
+    if severity_filter: q=q.filter(AuditEvent.severity==severity_filter)
+    events=q.order_by(AuditEvent.id.desc()).limit(1000).all()
+    return render_template_string(AUDIT_LOG_HTML,events=events,event_filter=event_filter,severity_filter=severity_filter)
+
+@app.route("/admin/geography/load", methods=["POST"])
+@admin_required
+def reload_kenya_geography():
+    validate_csrf(); user=current_user(); ok,message=seed_kenya_electoral_geography(force=True)
+    log_event("KENYA_GEOGRAPHY_LOAD", "INFO" if ok else "ERROR", user.id, message)
+    flash(message, "success" if ok else "danger"); return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin", methods=["GET", "POST"])
 @admin_required
@@ -1559,7 +1777,9 @@ def admin_dashboard():
         flash("Election settings updated.", "success")
         return redirect(url_for("admin_dashboard"))
 
-    events = AuditEvent.query.order_by(AuditEvent.id.desc()).limit(50).all()
+    state=AuditViewState.query.filter_by(user_id=user.id).first()
+    cleared_through=state.cleared_through_id if state else 0
+    events=AuditEvent.query.filter(AuditEvent.id > cleared_through).order_by(AuditEvent.id.desc()).limit(50).all()
     return render_template_string(
         ADMIN_HTML,
         election=election,
