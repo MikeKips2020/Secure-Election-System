@@ -89,7 +89,7 @@ RESET_TOKEN_MAX_AGE_SECONDS = 900  # 15 minutes
 # application uses the Resend HTTPS API instead of SMTP.
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 MAIL_FROM = os.environ.get("MAIL_FROM", "onboarding@resend.dev")
-MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Nairobi County E-Voting")
+MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "Kenya Secure E-Voting")
 EMAIL_VERIFICATION_MAX_AGE_SECONDS = 86400  # 24 hours
 
 
@@ -118,7 +118,7 @@ def send_email(to_email, subject, html_body, tag):
         headers={
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
-            "User-Agent": "Nairobi-County-EVoting/1.0",
+            "User-Agent": "Kenya-Secure-EVoting/3.1.1-RC2",
         },
         method="POST",
     )
@@ -138,31 +138,31 @@ def send_email(to_email, subject, html_body, tag):
 
 
 def send_email_verification_email(to_email, verification_url):
-    subject = "Verify your Nairobi County E-Voting email"
+    subject = "Verify your Kenya Secure E-Voting email"
     html = f"""
     <html><body>
       <h2>Verify your email address</h2>
-      <p>Thank you for registering on the Nairobi County E-Voting Platform.</p>
+      <p>Thank you for registering on the Kenya Secure E-Voting Platform.</p>
       <p>Please click the button below to verify your email address:</p>
       <p><a href="{verification_url}" style="display:inline-block;padding:12px 18px;background:#0c8a5f;color:white;text-decoration:none;border-radius:6px;">Verify Email Address</a></p>
       <p>This link expires in 24 hours.</p>
       <p>If you did not create this account, you can safely ignore this email.</p>
-      <p>— Nairobi County E-Voting Platform</p>
+      <p>— Kenya Secure E-Voting Platform</p>
     </body></html>
     """
     return send_email(to_email, subject, html, "email_verification")
 
 
 def send_password_reset_email(to_email, reset_url):
-    subject = "Reset your Nairobi County E-Voting password"
+    subject = "Reset your Kenya Secure E-Voting password"
     html = f"""
     <html><body>
       <h2>Password reset request</h2>
-      <p>We received a request to reset the password for your Nairobi County E-Voting account.</p>
+      <p>We received a request to reset the password for your Kenya Secure E-Voting account.</p>
       <p><a href="{reset_url}" style="display:inline-block;padding:12px 18px;background:#0c8a5f;color:white;text-decoration:none;border-radius:6px;">Reset Password</a></p>
       <p>This link expires in 15 minutes and can only be used once.</p>
       <p>If you did not request this, you can safely ignore this email.</p>
-      <p>— Nairobi County E-Voting Platform</p>
+      <p>— Kenya Secure E-Voting Platform</p>
     </body></html>
     """
     return send_email(to_email, subject, html, "password_reset")
@@ -174,7 +174,7 @@ EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ELECTION_DEFAULT_TITLE = os.environ.get(
-    "ELECTION_TITLE", "Nairobi County Gubernatorial Election"
+    "ELECTION_TITLE", "Kenya General Election"
 )
 
 CANDIDATE_SEED = [
@@ -357,6 +357,23 @@ def current_user():
 # The navbar therefore reads the current role from the database rather than
 # relying on a possibly stale role value in the browser session.
 app.jinja_env.globals["current_user"] = current_user
+
+
+def voter_area(user):
+    """Return display names for the authenticated voter's electoral area."""
+    if not user:
+        return {"county": "Not assigned", "constituency": "Not assigned", "ward": "Not assigned"}
+    county = db.session.get(Region, user.region_id) if user.region_id else None
+    constituency = db.session.get(Constituency, user.constituency_id) if user.constituency_id else None
+    ward = db.session.get(Ward, user.ward_id) if user.ward_id else None
+    return {
+        "county": county.name if county else "Not assigned",
+        "constituency": constituency.name if constituency else "Not assigned",
+        "ward": ward.name if ward else "Not assigned",
+    }
+
+
+app.jinja_env.globals["voter_area"] = voter_area
 
 
 def admin_required(view):
@@ -666,7 +683,7 @@ BASE_HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Nairobi County E-Voting{% endblock %}</title>
+  <title>{% block title %}Kenya Secure E-Voting{% endblock %}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     :root {
@@ -728,7 +745,7 @@ BASE_HTML = """
         <path d="M13 16 L20 6 L27 16 Z" fill="#d9a441"/>
         <rect x="17.5" y="21" width="5" height="9" rx="1" fill="#f7f5ef"/>
       </svg>
-      Nairobi County E-Voting
+      Kenya Secure E-Voting
     </a>
     <div class="d-flex gap-2">
       <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('results') }}">Audit &amp; Results</a>
@@ -816,7 +833,7 @@ HOME_HTML = """
 <div class="hero mb-4">
   <div class="hero-inner row align-items-center g-4">
     <div class="col-lg-7">
-      <span class="hero-eyebrow"><span class="dot"></span> Nairobi County &middot; Gubernatorial Election</span>
+      <span class="hero-eyebrow"><span class="dot"></span> Kenya &middot; General Election</span>
       <h1 class="display-6">Vote with confidence. Verify with proof.</h1>
       <p class="lead mt-3">
         A digital ballot box built so that no single vote can be read in the clear,
@@ -853,6 +870,20 @@ HOME_HTML = """
     </div>
   </div>
 </div>
+
+{% if session.get('user_id') and current_user() and current_user().role != 'admin' %}
+{% set area = voter_area(current_user()) %}
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body py-3">
+    <div class="d-flex flex-wrap align-items-center gap-3">
+      <strong>Your Electoral Area</strong>
+      <span><strong>County:</strong> {{ area.county }}</span>
+      <span><strong>Constituency:</strong> {{ area.constituency }}</span>
+      <span><strong>Ward:</strong> {{ area.ward }}</span>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 <div class="row g-3 mb-4">
   <div class="col-md-4">
@@ -1418,15 +1449,25 @@ def login():
             )
             return redirect(url_for("resend_verification"))
 
+        # ADMIN_EMAIL is authoritative for the staging/demo administrator.
+        # Promote on login too, so an account created after service startup gains
+        # admin access without requiring another restart.
+        if ADMIN_EMAIL and user.email.strip().lower() == ADMIN_EMAIL:
+            if user.role != "admin":
+                user.role = "admin"
+                db.session.commit()
+                log_event("ADMIN_ROLE_GRANTED", "INFO", user.id,
+                          "Administrator role granted from ADMIN_EMAIL during login.")
+
         session.clear()
         session["user_id"] = user.id
         session["user_name"] = user.full_name
-        session["has_voted"] = user.has_voted
 
         flash(f"Welcome, {user.full_name}.", "success")
-        if user.has_voted:
-            flash("Our records show you have already voted. Duplicate voting is blocked.", "info")
-            return redirect(url_for("results"))
+        if user.role == "admin":
+            return redirect(url_for("admin_dashboard"))
+        # V3 completion is per contest via BallotReceipt. The legacy global
+        # User.has_voted flag must not block a voter from remaining contests.
         return redirect(url_for("vote"))
 
     return render_template_string(LOGIN_HTML)
