@@ -1544,23 +1544,23 @@ const ac=document.getElementById('adminCounty'), ax=document.getElementById('adm
 
 CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}
 <style>
-.contest-form .form-label{font-weight:600;color:#294866}.contest-form .form-select{font-weight:600;color:#263f5d;background-color:#f4f8fc;border-color:#cbd9e7}.contest-form .form-select:disabled{background-color:#eef2f6;color:#7b8794}.scope-note{background:#eef7ff;border:1px solid #cfe7fb;color:#315a78;border-radius:.5rem;padding:.65rem .8rem}
+.contest-stat{font-size:1.55rem;font-weight:700;color:#17375e}.filter-label{font-weight:600;color:#294866}.contest-table td,.contest-table th{vertical-align:middle}.readiness-row{display:flex;justify-content:space-between;gap:1rem;padding:.45rem 0;border-bottom:1px solid #edf0f3}.readiness-row:last-child{border-bottom:0}.scope-card{border-left:4px solid #0d6efd}.protected-note{background:#eef7ff;border:1px solid #cfe7fb;color:#315a78;border-radius:.5rem;padding:.7rem .85rem}
 </style>
-<h2>Election Contests</h2><p class='text-muted'>President is national; Governor, Senator and Woman Representative are county contests; MP is constituency; MCA is ward.</p>
-<form method='post' class='card card-body mb-4 contest-form' id='contestForm'><input type='hidden' name='csrf_token' value='{{ csrf_token() }}'>
-<div class='mb-3'><label class='form-label' for='position'>Position</label><select class='form-select' id='position' name='position'>{% for p in positions %}<option>{{p}}</option>{% endfor %}</select></div>
-<div id='scopeNote' class='scope-note mb-3'>National contest — no geographic selection is required.</div>
-<div class='mb-3' id='countyWrap'><label class='form-label' for='contestCounty'>County</label><select class='form-select' id='contestCounty' name='county_id'><option value=''>Select county</option>{% for c in counties %}<option value='{{c.id}}'>{{c.name}}</option>{% endfor %}</select></div>
-<div class='mb-3' id='constituencyWrap'><label class='form-label' for='contestConstituency'>Constituency</label><select class='form-select' id='contestConstituency' name='constituency_id' disabled><option value=''>Select county first</option></select></div>
-<div class='mb-3' id='wardWrap'><label class='form-label' for='contestWard'>Ward</label><select class='form-select' id='contestWard' name='ward_id' disabled><option value=''>Select constituency first</option></select></div>
-<button class='btn btn-primary'>Create Contest</button></form>
-<table class='table'><tr><th>Position</th><th>Area</th></tr>{% for c in contests %}<tr><td>{{c.position}}</td><td>{{area(c)}}</td></tr>{% else %}<tr><td colspan='2' class='text-muted'>No contests created yet.</td></tr>{% endfor %}</table>
+<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3"><div><h2 class="mb-1">Election Contests</h2><p class="text-muted mb-0">Browse and verify contests for the current election without scrolling through the full national list.</p></div><a class="btn btn-outline-secondary" href="{{url_for('manage_elections')}}">Election Management</a></div>
+<div class="card card-body mb-4 scope-card"><div class="row g-3 align-items-center"><div class="col-lg-7"><h4 class="mb-1">{{election.title}}</h4><div class="text-muted">{{'General Election' if election.election_type=='general' else 'By-Election'}}{% if election.election_date %} · {{election.election_date.strftime('%d %B %Y')}}{% endif %}</div></div><div class="col-lg-5 text-lg-end"><span class="badge text-bg-primary">{{total_contests}} CONTESTS</span> <span class="badge {{'text-bg-success' if election.is_open else 'text-bg-secondary'}}">VOTING {{'OPEN' if election.is_open else 'CLOSED'}}</span> <span class="badge {{'text-bg-success' if election.results_visible else 'text-bg-secondary'}}">RESULTS {{'RELEASED' if election.results_visible else 'NOT RELEASED'}}</span></div></div></div>
+<div class="row g-3 mb-4">
+{% for item in summary %}<div class="col-md-4 col-xl-2"><div class="card card-body h-100"><div class="contest-stat">{{item.count}}</div><div>{{item.label}}</div></div></div>{% endfor %}
+</div>
+<div class="row g-4 mb-4"><div class="col-lg-8"><div class="card card-body h-100"><div class="d-flex justify-content-between flex-wrap gap-2 mb-3"><div><h4 class="mb-1">Contest Browser</h4><div class="text-muted small">Filter by position and electoral area.</div></div><input id="contestSearch" class="form-control" style="max-width:250px" placeholder="Search contests..."></div>
+<div class="row g-2 mb-3"><div class="col-md-3"><label class="filter-label form-label">Position</label><select id="filterPosition" class="form-select"><option value="">All positions</option>{% for p in positions %}<option>{{p}}</option>{% endfor %}</select></div><div class="col-md-3"><label class="filter-label form-label">County</label><select id="filterCounty" class="form-select"><option value="">All counties</option>{% for c in counties %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></div><div class="col-md-3"><label class="filter-label form-label">Constituency</label><select id="filterCon" class="form-select" disabled><option value="">All constituencies</option></select></div><div class="col-md-3"><label class="filter-label form-label">Ward</label><select id="filterWard" class="form-select" disabled><option value="">All wards</option></select></div></div>
+<div class="table-responsive" style="max-height:560px;overflow:auto"><table class="table table-hover contest-table" id="contestTable"><thead class="sticky-top bg-white"><tr><th>Position</th><th>Area</th><th>Candidates</th></tr></thead><tbody>{% for c in contests %}<tr data-position="{{c.position}}" data-county="{{c.county_id or ''}}" data-con="{{c.constituency_id or ''}}" data-ward="{{c.ward_id or ''}}"><td>{{c.position}}</td><td>{{area(c)}}</td><td><span class="badge {{'text-bg-success' if candidate_counts.get(c.id,0) else 'text-bg-light border'}}">{{candidate_counts.get(c.id,0)}}</span></td></tr>{% endfor %}</tbody></table></div><div class="small text-muted mt-2" id="visibleCount"></div></div></div>
+<div class="col-lg-4"><div class="card card-body h-100"><h4>Election Readiness</h4><div class="readiness-row"><span>Contests created</span><strong>{{total_contests}}</strong></div><div class="readiness-row"><span>Geography</span><strong>{{'VERIFIED' if geography_verified else 'CHECK'}}</strong></div><div class="readiness-row"><span>Contests with candidates</span><strong>{{contests_with_candidates}} / {{total_contests}}</strong></div><div class="readiness-row"><span>Without candidates</span><strong>{{contests_without_candidates}}</strong></div><div class="readiness-row"><span>Voting</span><strong>{{'OPEN' if election.is_open else 'CLOSED'}}</strong></div><div class="readiness-row"><span>Results</span><strong>{{'RELEASED' if election.results_visible else 'NOT RELEASED'}}</strong></div><hr><a class="btn btn-outline-primary" href="{{url_for('manage_candidates')}}">Manage Candidates</a></div></div></div>
+{% if election.election_type=='general' %}<div class="protected-note"><strong>Protected General Election structure.</strong> These contests were automatically generated from verified electoral geography. Manual contest creation is disabled to prevent duplicate or inconsistent contests.</div>{% else %}<details class="card card-body"><summary class="fw-bold">Advanced By-Election Contest Administration</summary><div class="alert alert-warning mt-3">A By-Election normally contains only the vacancy contest created with the election. Add another contest only when deliberately required.</div><form method="post" class="row g-2" id="contestForm"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><div class="col-md-3"><label class="filter-label form-label">Position</label><select class="form-select" id="position" name="position"><option value="">Select position...</option>{% for p in positions %}<option>{{p}}</option>{% endfor %}</select></div><div class="col-md-3" id="countyWrap"><label class="filter-label form-label">County</label><select class="form-select" id="contestCounty" name="county_id"><option value="">Select county...</option>{% for c in counties %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></div><div class="col-md-3" id="constituencyWrap"><label class="filter-label form-label">Constituency</label><select class="form-select" id="contestConstituency" name="constituency_id" disabled><option value="">Select county first</option></select></div><div class="col-md-3" id="wardWrap"><label class="filter-label form-label">Ward</label><select class="form-select" id="contestWard" name="ward_id" disabled><option value="">Select constituency first</option></select></div><div class="col-12"><button class="btn btn-primary">Create By-Election Contest</button></div></form></details>{% endif %}
 <script>
-const pos=document.getElementById('position'), cw=document.getElementById('countyWrap'), xw=document.getElementById('constituencyWrap'), ww=document.getElementById('wardWrap'), county=document.getElementById('contestCounty'), con=document.getElementById('contestConstituency'), ward=document.getElementById('contestWard'), note=document.getElementById('scopeNote');
-function mode(){const p=pos.value;const national=p==='President', countyOnly=['Governor','Senator','Woman Representative'].includes(p), mp=p==='Member of Parliament';cw.style.display=national?'none':'';xw.style.display=(national||countyOnly)?'none':'';ww.style.display=(national||countyOnly||mp)?'none':'';county.required=!national;con.required=mp||p==='Member of County Assembly';ward.required=p==='Member of County Assembly';note.textContent=national?'National contest — no geographic selection is required.':countyOnly?'County contest — select the county only.':mp?'Constituency contest — select County, then Constituency.':'Ward contest — select County, Constituency, then Ward.';}
-pos.addEventListener('change',mode);mode();
-county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;ward.innerHTML='<option value="">Select constituency first</option>';if(!county.value){con.innerHTML='<option value="">Select county first</option>';return;}const rows=await fetch('/api/constituencies/'+county.value).then(r=>r.json());con.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');con.disabled=false;});
-con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value){ward.innerHTML='<option value="">Select constituency first</option>';return;}const rows=await fetch('/api/wards/'+con.value).then(r=>r.json());ward.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=false;});
+const fp=document.getElementById('filterPosition'),fc=document.getElementById('filterCounty'),fx=document.getElementById('filterCon'),fw=document.getElementById('filterWard'),q=document.getElementById('contestSearch');
+function filterRows(){let n=0;document.querySelectorAll('#contestTable tbody tr').forEach(r=>{let ok=(!fp.value||r.dataset.position===fp.value)&&(!fc.value||r.dataset.county===fc.value)&&(!fx.value||r.dataset.con===fx.value)&&(!fw.value||r.dataset.ward===fw.value)&&(!q.value||r.innerText.toLowerCase().includes(q.value.toLowerCase()));r.style.display=ok?'':'none';if(ok)n++;});document.getElementById('visibleCount').textContent=n+' contest(s) shown.';}
+fp.addEventListener('change',filterRows);q.addEventListener('input',filterRows);fc.addEventListener('change',async()=>{fx.disabled=true;fw.disabled=true;fx.innerHTML='<option value="">All constituencies</option>';fw.innerHTML='<option value="">All wards</option>';if(fc.value){const rows=await fetch('/api/constituencies/'+fc.value).then(r=>r.json());fx.innerHTML='<option value="">All constituencies</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fx.disabled=false;}filterRows();});fx.addEventListener('change',async()=>{fw.disabled=true;fw.innerHTML='<option value="">All wards</option>';if(fx.value){const rows=await fetch('/api/wards/'+fx.value).then(r=>r.json());fw.innerHTML='<option value="">All wards</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fw.disabled=false;}filterRows();});fw.addEventListener('change',filterRows);filterRows();
+{% if election.election_type!='general' %}const pos=document.getElementById('position'),cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),county=document.getElementById('contestCounty'),con=document.getElementById('contestConstituency'),ward=document.getElementById('contestWard');function mode(){const p=pos.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';cw.style.display=(!p||n)?'none':'';xw.style.display=(!p||n||co)?'none':'';ww.style.display=(!p||n||co||mp)?'none':'';}pos.addEventListener('change',mode);mode();county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;ward.innerHTML='<option value="">Select constituency first</option>';if(!county.value)return;const rows=await fetch('/api/constituencies/'+county.value).then(r=>r.json());con.innerHTML='<option value="">Select constituency...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');con.disabled=false;});con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value)return;const rows=await fetch('/api/wards/'+con.value).then(r=>r.json());ward.innerHTML='<option value="">Select ward...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=false;});{% endif %}
 </script>{% endblock %}"""
 
 ELECTIONS_RC7 = """{% extends 'base.html' %}{% block content %}
@@ -2145,35 +2145,46 @@ def manage_elections():
 @app.route("/admin/contests", methods=["GET","POST"])
 @admin_required
 def manage_contests():
+    election=get_election()
+    # General-election contests are generated from the verified geography and are
+    # deliberately protected from manual additions on this page.
     if request.method=="POST":
-        validate_csrf(); pos=request.form.get("position"); county=request.form.get("county_id",""); con=request.form.get("constituency_id",""); ward=request.form.get("ward_id","")
+        validate_csrf()
+        if election.election_type=="general":
+            flash("General Election contests are protected and generated automatically from verified electoral geography.","warning")
+            return redirect(url_for("manage_contests"))
+        pos=request.form.get("position"); county=request.form.get("county_id",""); con=request.form.get("constituency_id",""); ward=request.form.get("ward_id","")
         county=int(county) if county.isdigit() else None; con=int(con) if con.isdigit() else None; ward=int(ward) if ward.isdigit() else None
         if pos not in POSITIONS:
             flash("Select a valid election position.","danger"); return redirect(url_for("manage_contests"))
-        if pos=="President":
-            scope="national"; county=con=ward=None
+        if pos=="President": scope="national"; county=con=ward=None
         elif pos in ("Governor","Senator","Woman Representative"):
             scope="county"; con=ward=None
-            if not county or not Region.query.filter_by(id=county,active=True).first():
-                flash("Select a valid county for this contest.","danger"); return redirect(url_for("manage_contests"))
+            if not county or not Region.query.filter_by(id=county,active=True).first(): flash("Select a valid county for this contest.","danger"); return redirect(url_for("manage_contests"))
         elif pos=="Member of Parliament":
-            scope="constituency"; ward=None
-            constituency=Constituency.query.get(con) if con else None
-            if not county or not constituency or constituency.county_id != county:
-                flash("Select a constituency that belongs to the selected county.","danger"); return redirect(url_for("manage_contests"))
+            scope="constituency"; ward=None; constituency=Constituency.query.get(con) if con else None
+            if not county or not constituency or constituency.county_id!=county: flash("Select a constituency that belongs to the selected county.","danger"); return redirect(url_for("manage_contests"))
         else:
-            scope="ward"
-            constituency=Constituency.query.get(con) if con else None; ward_obj=Ward.query.get(ward) if ward else None
-            if not county or not constituency or constituency.county_id != county or not ward_obj or ward_obj.constituency_id != con:
-                flash("Select a ward that belongs to the selected constituency and county.","danger"); return redirect(url_for("manage_contests"))
-        election=get_election()
+            scope="ward"; constituency=Constituency.query.get(con) if con else None; ward_obj=Ward.query.get(ward) if ward else None
+            if not county or not constituency or constituency.county_id!=county or not ward_obj or ward_obj.constituency_id!=con: flash("Select a ward that belongs to the selected constituency and county.","danger"); return redirect(url_for("manage_contests"))
         duplicate=Contest.query.filter_by(election_id=election.id,position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward).first()
-        if duplicate:
-            flash("That election contest already exists for this area.","warning"); return redirect(url_for("manage_contests"))
+        if duplicate: flash("That election contest already exists for this area.","warning"); return redirect(url_for("manage_contests"))
         db.session.add(Contest(election_id=election.id,position=pos,scope_level=scope,county_id=county,constituency_id=con,ward_id=ward)); db.session.commit()
-        user=current_user(); log_event("CONTEST_CREATED","INFO",user.id if user else None,f"{pos} — {scope}")
-        flash("Contest created.","success"); return redirect(url_for("manage_contests"))
-    return render_template_string(CONTESTS_V3, positions=POSITIONS, counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(), contests=Contest.query.filter_by(election_id=get_election().id).order_by(Contest.position,Contest.id).all(), area=contest_area_name)
+        user=current_user(); log_event("CONTEST_CREATED","INFO",user.id if user else None,f"{pos} — {scope}; election={election.id}")
+        flash("By-Election contest created.","success"); return redirect(url_for("manage_contests"))
+    contests=Contest.query.filter_by(election_id=election.id).order_by(Contest.position,Contest.id).all()
+    contest_ids=[c.id for c in contests]
+    candidate_counts={cid:0 for cid in contest_ids}
+    if contest_ids:
+        for cid,count in db.session.query(ContestCandidate.contest_id,db.func.count(ContestCandidate.candidate_id)).filter(ContestCandidate.contest_id.in_(contest_ids)).group_by(ContestCandidate.contest_id).all(): candidate_counts[cid]=count
+    counts={p:sum(1 for c in contests if c.position==p) for p in POSITIONS}
+    labels={"President":"President","Governor":"Governor","Senator":"Senator","Woman Representative":"Woman Representative","Member of Parliament":"MP","Member of County Assembly":"MCA"}
+    summary=[{"label":labels[p],"count":counts[p]} for p in POSITIONS]
+    total=len(contests); with_candidates=sum(1 for c in contests if candidate_counts.get(c.id,0)>0)
+    official_count=Region.query.filter(Region.code!="LEGACY",Region.active==True).count(); constituency_count=Constituency.query.filter_by(active=True).count(); ward_count=Ward.query.filter_by(active=True).count()
+    geography_verified=(official_count==47 and constituency_count==290 and ward_count==1450)
+    return render_template_string(CONTESTS_V3,election=election,positions=POSITIONS,counties=Region.query.filter(Region.code!="LEGACY",Region.active==True).order_by(Region.name).all(),contests=contests,area=contest_area_name,candidate_counts=candidate_counts,summary=summary,total_contests=total,contests_with_candidates=with_candidates,contests_without_candidates=total-with_candidates,geography_verified=geography_verified)
+
 
 @app.route("/results")
 def results():
