@@ -605,49 +605,197 @@ def seed_regions():
 
 GEOGRAPHY_SOURCE_URL = "https://raw.githubusercontent.com/stevehoober254/kenya-county-data/main/county_data.json"
 
-def seed_kenya_electoral_geography(force=False):
-    """Load Kenya counties -> constituencies -> wards reference data.
+# The upstream geography dataset uses the official label "Nairobi City" while
+# the application seeds county 047 as "Nairobi".  Keep one canonical county
+# record so dependent dropdowns cannot split Nairobi's constituencies away from
+# the county selected by voters/admins.
+COUNTY_NAME_ALIASES = {
+    "nairobi city": "Nairobi",
+    "nairobi city county": "Nairobi",
+    "nairobi county": "Nairobi",
+}
 
-    The upstream structured dataset states that it is compiled from IEBC and
-    Kenyan government public data. V3.1 validates the expected national counts
-    (47 counties, 290 constituencies, 1,450 wards) before writing anything.
-    Existing rows are matched by parent + name and are never destructively reset.
+
+def canonical_county_name(name):
+    cleaned = (name or "").strip()
+    return COUNTY_NAME_ALIASES.get(cleaned.casefold(), cleaned)
+
+
+def repair_nairobi_county_alias():
+    """Non-destructively merge legacy 'Nairobi City' geography into Nairobi.
+
+    Foreign-key-like integer references used by this prototype are repointed
+    before the duplicate Region row is removed. Votes/ballots are untouched.
     """
-    if not force and Constituency.query.count() == 290 and Ward.query.count() == 1450:
-        return True, "Kenyan electoral geography already loaded (47 counties, 290 constituencies, 1,450 wards)."
+    canonical = Region.query.filter(db.func.lower(Region.name) == "nairobi").first()
+    aliases = Region.query.filter(
+        db.func.lower(Region.name).in_(["nairobi city", "nairobi city county", "nairobi county"])
+    ).all()
+
+    if not canonical:
+        canonical = Region(name="Nairobi", code="047", active=True)
+        db.session.add(canonical)
+        db.session.flush()
+
+    moved = 0
+    for alias in aliases:
+        if alias.id == canonical.id:
+            continue
+        # Preserve voter and contest geography references.
+        User.query.filter_by(region_id=alias.id).update({User.region_id: canonical.id}, synchronize_session=False)
+        Contest.query.filter_by(county_id=alias.id).update({Contest.county_id: canonical.id}, synchronize_session=False)
+
+        # Move constituencies. If an equivalent constituency already exists
+        # under Nairobi, repoint ward/user/contest references to that row.
+        for old_x in Constituency.query.filter_by(county_id=alias.id).all():
+            existing = Constituency.query.filter(
+                Constituency.county_id == canonical.id,
+                db.func.lower(Constituency.name) == old_x.name.lower()
+            ).first()
+            if existing and existing.id != old_x.id:
+                Ward.query.filter_by(constituency_id=old_x.id).update(
+                    {Ward.constituency_id: existing.id}, synchronize_session=False)
+                User.query.filter_by(constituency_id=old_x.id).update(
+                    {User.constituency_id: existing.id}, synchronize_session=False)
+                Contest.query.filter_by(constituency_id=old_x.id).update(
+                    {Contest.constituency_id: existing.id}, synchronize_session=False)
+                db.session.delete(old_x)
+            else:
+                old_x.county_id = canonical.id
+            moved += 1
+        db.session.flush()
+        db.session.delete(alias)
+
+    db.session.flush()
+    return moved
+
+
+def validate_geography_integrity(expected_payload=None):
+    """Validate hierarchy relationships, not only national row totals."""
+    official_counties = Region.query.filter(Region.name != "Legacy / Unassigned").all()
+    county_ids = [c.id for c in official_counties]
+    constituency_total = Constituency.query.filter(Constituency.county_id.in_(county_ids)).count() if county_ids else 0
+    constituency_ids = [x.id for x in Constituency.query.filter(Constituency.county_id.in_(county_ids)).all()] if county_ids else []
+    ward_total = Ward.query.filter(Ward.constituency_id.in_(constituency_ids)).count() if constituency_ids else 0
+
+    empty_counties = [
+        c.name for c in official_counties
+        if Constituency.query.filter_by(county_id=c.id).count() == 0
+    ]
+    orphan_constituencies = Constituency.query.filter(~Constituency.county_id.in_(county_ids)).count() if county_ids else Constituency.query.count()
+    all_constituency_ids = [x.id for x in Constituency.query.all()]
+    orphan_wards = Ward.query.filter(~Ward.constituency_id.in_(all_constituency_ids)).count() if all_constituency_ids else Ward.query.count()
+
+    nairobi = Region.query.filter(db.func.lower(Region.name) == "nairobi").first()
+    nairobi_count = Constituency.query.filter_by(county_id=nairobi.id).count() if nairobi else 0
+
+    errors = []
+    if len(official_counties) != 47:
+        errors.append(f"expected 47 counties, found {len(official_counties)}")
+    if constituency_total != 290:
+        errors.append(f"expected 290 constituencies, found {constituency_total}")
+    if ward_total != 1450:
+        errors.append(f"expected 1,450 wards, found {ward_total}")
+    if empty_counties:
+        errors.append("counties with no constituencies: " + ", ".join(sorted(empty_counties)))
+    if orphan_constituencies:
+        errors.append(f"{orphan_constituencies} orphan constituency record(s)")
+    if orphan_wards:
+        errors.append(f"{orphan_wards} orphan ward record(s)")
+    if nairobi_count != 17:
+        errors.append(f"Nairobi should have 17 constituencies, found {nairobi_count}")
+
+    # When source data is available, verify each county's expected child count.
+    if expected_payload:
+        for county_data in expected_payload:
+            cname = canonical_county_name(county_data.get("name"))
+            county = Region.query.filter(db.func.lower(Region.name) == cname.lower()).first()
+            expected_x = len(county_data.get("constituencies", []))
+            actual_x = Constituency.query.filter_by(county_id=county.id).count() if county else 0
+            if actual_x != expected_x:
+                errors.append(f"{cname}: expected {expected_x} constituencies, found {actual_x}")
+
+    return (not errors), errors, nairobi_count
+
+
+def seed_kenya_electoral_geography(force=False):
+    """Load/repair Kenya counties -> constituencies -> wards reference data.
+
+    RC4 normalises the Nairobi City/Nairobi naming mismatch and validates the
+    parent-child hierarchy. Existing voters, contests, votes and ballot receipts
+    are preserved; no election data is reset or deleted.
+    """
+    # Always repair the known alias, even if the national row totals already
+    # look correct. This is the RC3 bug: totals could be 290/1450 while Nairobi
+    # itself appeared to have zero constituencies.
     try:
-        req=urllib.request.Request(GEOGRAPHY_SOURCE_URL, headers={"User-Agent":"MSc-EVoting-V3.1.1/1.0"})
+        moved = repair_nairobi_county_alias()
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return False, f"Nairobi geography repair failed: {exc}"
+
+    if not force:
+        ok, errors, nairobi_count = validate_geography_integrity()
+        if ok:
+            return True, ("Kenyan electoral geography verified: 47 counties, 290 constituencies, "
+                          f"1,450 wards; Nairobi has {nairobi_count} constituencies.")
+
+    try:
+        req = urllib.request.Request(GEOGRAPHY_SOURCE_URL, headers={"User-Agent":"MSc-EVoting-V3.1.1-RC4/1.0"})
         with urllib.request.urlopen(req, timeout=30) as response:
-            payload=json.loads(response.read().decode("utf-8"))
+            payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
         return False, f"Reference-data download failed: {exc}"
 
     if not isinstance(payload, list):
         return False, "Reference-data format was not recognised."
-    county_count=len(payload)
-    constituency_count=sum(len(c.get("constituencies",[])) for c in payload)
-    ward_count=sum(len(x.get("wards",[])) for c in payload for x in c.get("constituencies",[]))
-    if (county_count, constituency_count, ward_count) != (47,290,1450):
-        return False, f"Safety check failed: source returned {county_count} counties, {constituency_count} constituencies and {ward_count} wards."
+    county_count = len(payload)
+    constituency_count = sum(len(c.get("constituencies", [])) for c in payload)
+    ward_count = sum(len(x.get("wards", [])) for c in payload for x in c.get("constituencies", []))
+    if (county_count, constituency_count, ward_count) != (47, 290, 1450):
+        return False, (f"Safety check failed: source returned {county_count} counties, "
+                       f"{constituency_count} constituencies and {ward_count} wards.")
 
-    for county_data in payload:
-        cname=(county_data.get("name") or "").strip()
-        county=Region.query.filter(db.func.lower(Region.name)==cname.lower()).first()
-        if not county:
-            county=Region(name=cname, active=True)
-            db.session.add(county); db.session.flush()
-        for xdata in county_data.get("constituencies",[]):
-            xname=(xdata.get("name") or "").strip()
-            constituency=Constituency.query.filter_by(county_id=county.id, name=xname).first()
-            if not constituency:
-                constituency=Constituency(name=xname, county_id=county.id, active=True)
-                db.session.add(constituency); db.session.flush()
-            for wdata in xdata.get("wards",[]):
-                wname=(wdata.get("name") or "").strip()
-                if wname and not Ward.query.filter_by(constituency_id=constituency.id, name=wname).first():
-                    db.session.add(Ward(name=wname, constituency_id=constituency.id, active=True))
-    db.session.commit()
-    return True, "Loaded 47 counties, 290 constituencies and 1,450 wards."
+    try:
+        for county_data in payload:
+            cname = canonical_county_name(county_data.get("name"))
+            county = Region.query.filter(db.func.lower(Region.name) == cname.lower()).first()
+            if not county:
+                county = Region(name=cname, active=True)
+                db.session.add(county)
+                db.session.flush()
+            for xdata in county_data.get("constituencies", []):
+                xname = (xdata.get("name") or "").strip()
+                constituency = Constituency.query.filter(
+                    Constituency.county_id == county.id,
+                    db.func.lower(Constituency.name) == xname.lower()
+                ).first()
+                if not constituency:
+                    constituency = Constituency(name=xname, county_id=county.id, active=True)
+                    db.session.add(constituency)
+                    db.session.flush()
+                for wdata in xdata.get("wards", []):
+                    wname = (wdata.get("name") or "").strip()
+                    if wname and not Ward.query.filter(
+                        Ward.constituency_id == constituency.id,
+                        db.func.lower(Ward.name) == wname.lower()
+                    ).first():
+                        db.session.add(Ward(name=wname, constituency_id=constituency.id, active=True))
+        db.session.flush()
+        repair_nairobi_county_alias()
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        return False, f"Reference-data update failed and was rolled back: {exc}"
+
+    ok, errors, nairobi_count = validate_geography_integrity(payload)
+    if not ok:
+        return False, "Geography integrity check failed: " + "; ".join(errors[:12])
+
+    repair_note = f" Repaired {moved} Nairobi constituency mapping(s)." if moved else ""
+    return True, ("Loaded and verified 47 counties, 290 constituencies and 1,450 wards; "
+                  f"Nairobi has {nairobi_count} constituencies.{repair_note}")
 
 def seed_candidates():
     if Candidate.query.count() == 0:
