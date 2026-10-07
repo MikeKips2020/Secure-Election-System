@@ -1824,8 +1824,8 @@ def uploaded_image_data_url(field_name):
     if len(raw) > MAX_CANDIDATE_IMAGE_BYTES:
         raise ValueError("Each image must be 1 MB or smaller.")
     # Lightweight signature validation prevents a renamed arbitrary file.
-    valid = ((mime == "image/jpeg" and raw[:3] == b"\\xff\\xd8\\xff") or
-             (mime == "image/png" and raw[:8] == b"\\x89PNG\\r\\n\\x1a\\n") or
+    valid = ((mime == "image/jpeg" and raw[:3] == bytes([0xFF, 0xD8, 0xFF])) or
+             (mime == "image/png" and raw[:8] == bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])) or
              (mime == "image/webp" and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"))
     if not valid:
         raise ValueError("The uploaded file does not appear to be a valid image.")
