@@ -1002,159 +1002,16 @@ HOME_HTML = """
 {% extends "base.html" %}
 {% block content %}
 <style>
-  .hero {
-    background: linear-gradient(135deg, #0f2a44 0%, #12233d 55%, #0c3a2e 100%);
-    border-radius: 18px;
-    color: #f7f5ef;
-    overflow: hidden;
-    position: relative;
-  }
-  .hero::before {
-    content: "";
-    position: absolute; inset: 0;
-    background-image:
-      radial-gradient(circle at 10% 20%, rgba(217,164,65,.10) 0, transparent 45%),
-      radial-gradient(circle at 90% 80%, rgba(12,138,95,.18) 0, transparent 50%);
-    pointer-events: none;
-  }
-  .hero-inner { position: relative; padding: 3.25rem 2.5rem; }
-  .hero-eyebrow {
-    display: inline-flex; align-items: center; gap: .5rem;
-    font-size: .78rem; letter-spacing: .08em; text-transform: uppercase;
-    color: #cfe3d9; background: rgba(255,255,255,.08);
-    padding: .35rem .75rem; border-radius: 999px; margin-bottom: 1rem;
-  }
-  .hero-eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: #4fd1a0; }
-  .hero h1 { font-weight: 700; line-height: 1.15; }
-  .hero p.lead { color: #d7ddea; }
-  .hero-actions .btn { padding: .6rem 1.35rem; font-weight: 600; }
-
-  .feature-icon {
-    width: 46px; height: 46px; border-radius: 12px;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-  }
-  .feature-icon.gold  { background: rgba(217,164,65,.14); }
-  .feature-icon.green { background: rgba(12,138,95,.14); }
-  .feature-icon.navy  { background: rgba(18,35,61,.10); }
-  .feature-card { height: 100%; padding: 1.5rem; border-radius: 14px; }
-  .feature-title { font-weight: 700; margin: .85rem 0 .4rem; }
-  .feature-text { color: #4a5568; font-size: .95rem; margin-bottom: 0; }
-
-  .stat-strip {
-    border-radius: 14px; background: #fff; border: 1px solid var(--line);
-    padding: 1.25rem 1.5rem;
-  }
+.hero{background:linear-gradient(135deg,#102a43 0%,#12233d 52%,#0b4a3a 100%);border-radius:18px;color:#f7f5ef;overflow:hidden;position:relative;box-shadow:0 14px 36px rgba(18,35,61,.12)}.hero:before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 12% 18%,rgba(217,164,65,.12),transparent 42%),radial-gradient(circle at 90% 78%,rgba(12,138,95,.22),transparent 48%);pointer-events:none}.hero-inner{position:relative;padding:2.8rem 2.5rem}.hero-eyebrow{display:inline-flex;align-items:center;gap:.5rem;font-size:.76rem;letter-spacing:.08em;text-transform:uppercase;color:#d8e9e1;background:rgba(255,255,255,.08);padding:.38rem .78rem;border-radius:999px}.hero-eyebrow .dot{width:7px;height:7px;border-radius:50%;background:#4fd1a0}.hero h1{font-weight:750;line-height:1.08;letter-spacing:-.02em}.hero .lead{color:#d7ddea;max-width:760px}.hero-actions .btn{padding:.65rem 1.35rem;font-weight:650}.status-strip{background:#fff;border:1px solid var(--line);border-radius:14px;padding:1rem 1.25rem;box-shadow:0 5px 18px rgba(18,35,61,.04)}.status-label{font-size:.76rem;text-transform:uppercase;letter-spacing:.06em;color:#667085}.feature-card{height:100%;padding:1.45rem;border-radius:14px}.feature-icon{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-weight:700}.feature-icon.gold{background:rgba(217,164,65,.14)}.feature-icon.green{background:rgba(12,138,95,.14)}.feature-icon.navy{background:rgba(18,35,61,.10)}.feature-title{font-weight:700;margin:.85rem 0 .4rem}.feature-text{color:#4a5568;font-size:.95rem;margin:0}.how-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:1.4rem}.step{display:flex;align-items:center;gap:.65rem;white-space:nowrap}.step-num{width:30px;height:30px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:#eef6ff;color:#17375e;font-weight:700}.academic-note{border-top:1px solid var(--line);color:#667085;font-size:.9rem;padding-top:1.1rem}
 </style>
-
-<div class="hero mb-4">
-  <div class="hero-inner row align-items-center g-4">
-    <div class="col-lg-7">
-      <span class="hero-eyebrow"><span class="dot"></span> Kenya &middot; General Election</span>
-      <h1 class="display-6">Vote with confidence. Verify with proof.</h1>
-      <p class="lead mt-3">
-        A digital ballot box built so that no single vote can be read in the clear,
-        and no single record can be quietly altered — every ballot locks into the
-        one cast before it, forming a chain anyone can check.
-      </p>
-      <div class="hero-actions d-flex flex-wrap gap-2 mt-4">
-        {% if not session.get('user_id') %}
-        <a href="{{ url_for('register') }}" class="btn btn-emerald btn-lg">Register to Vote</a>
-        <a href="{{ url_for('login') }}" class="btn btn-outline-parchment btn-lg">Login</a>
-        {% else %}
-          <a href="{{ url_for('vote') }}" class="btn btn-emerald btn-lg">Open My Ballot</a>
-        {% endif %}
-        <a href="{{ url_for('results') }}" class="btn btn-outline-parchment btn-lg">View Live Audit</a>
-      </div>
-    </div>
-    <div class="col-lg-5 text-center">
-      <svg viewBox="0 0 320 280" width="100%" height="auto" style="max-width:320px" xmlns="http://www.w3.org/2000/svg">
-        <ellipse cx="160" cy="248" rx="110" ry="14" fill="#000" opacity=".18"/>
-        <rect x="70" y="120" width="180" height="110" rx="10" fill="#0c8a5f"/>
-        <rect x="70" y="120" width="180" height="26" rx="10" fill="#0a6e4c"/>
-        <rect x="140" y="98" width="40" height="28" rx="4" fill="#0a6e4c"/>
-        <rect x="145" y="150" width="30" height="55" rx="4" fill="#f7f5ef"/>
-        <path d="M96 92 L160 40 L224 92 Z" fill="#d9a441"/>
-        <path d="M96 92 L160 40 L160 92 Z" fill="#c79333"/>
-        <g>
-          <rect x="180" y="6" width="46" height="64" rx="4" fill="#fff" stroke="#12233d" stroke-width="2.5" transform="rotate(-12 203 38)"/>
-          <path d="M191 34 L201 44 L219 22" stroke="#0c8a5f" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round" transform="rotate(-12 203 38)"/>
-        </g>
-        <circle cx="60" cy="70" r="5" fill="#d9a441" opacity=".8"/>
-        <circle cx="255" cy="160" r="4" fill="#f7f5ef" opacity=".7"/>
-        <circle cx="245" cy="60" r="3" fill="#d9a441" opacity=".6"/>
-      </svg>
-    </div>
-  </div>
-</div>
-
-{% if session.get('user_id') and current_user() and current_user().role != 'admin' %}
-{% set area = voter_area(current_user()) %}
-<div class="card border-0 shadow-sm mb-4">
-  <div class="card-body py-3">
-    <div class="d-flex flex-wrap align-items-center gap-3">
-      <strong>Your Electoral Area</strong>
-      <span><strong>County:</strong> {{ area.county }}</span>
-      <span><strong>Constituency:</strong> {{ area.constituency }}</span>
-      <span><strong>Ward:</strong> {{ area.ward }}</span>
-    </div>
-  </div>
-</div>
-{% endif %}
-
-<div class="row g-3 mb-4">
-  <div class="col-md-4">
-    <div class="feature-card card">
-      <div class="feature-icon green">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="5" y="10" width="14" height="10" rx="2" stroke="#0c8a5f" stroke-width="2"/>
-          <path d="M8 10V7a4 4 0 018 0v3" stroke="#0c8a5f" stroke-width="2" stroke-linecap="round"/>
-          <circle cx="12" cy="15" r="1.6" fill="#0c8a5f"/>
-        </svg>
-      </div>
-      <div class="feature-title">Sealed the moment you vote</div>
-      <p class="feature-text">
-        Your ballot choice is encrypted with AES before it ever touches the database.
-        Not even a system administrator can open an individual vote and see who you chose.
-      </p>
-    </div>
-  </div>
-  <div class="col-md-4">
-    <div class="feature-card card">
-      <div class="feature-icon gold">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="3" y="8" width="8" height="8" rx="3" stroke="#c79333" stroke-width="2"/>
-          <rect x="13" y="8" width="8" height="8" rx="3" stroke="#c79333" stroke-width="2"/>
-          <path d="M11 12h2" stroke="#c79333" stroke-width="2" stroke-linecap="round"/>
-        </svg>
-      </div>
-      <div class="feature-title">Linked to every vote before it</div>
-      <p class="feature-text">
-        Each new ballot is fused with a SHA-256 fingerprint of the previous one. Change or
-        delete a single past vote, and every link after it breaks — instantly and visibly.
-      </p>
-    </div>
-  </div>
-  <div class="col-md-4">
-    <div class="feature-card card">
-      <div class="feature-icon navy">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" stroke="#12233d" stroke-width="2" stroke-linejoin="round"/>
-          <path d="M9 12l2 2 4-4" stroke="#0c8a5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </div>
-      <div class="feature-title">Open to independent scrutiny</div>
-      <p class="feature-text">
-        The <a href="{{ url_for('results') }}">Audit &amp; Results</a> page walks the entire
-        chain in the open — anyone can confirm the tally is genuine, without needing to trust
-        us on our word.
-      </p>
-    </div>
-  </div>
-</div>
+<div class="hero mb-3"><div class="hero-inner row align-items-center g-4"><div class="col-lg-8"><span class="hero-eyebrow"><span class="dot"></span> Kenya &middot; Secure Electronic Voting System</span><h1 class="display-5 mt-3">Secure. Verifiable. Transparent.</h1><p class="lead mt-3">A prototype electronic voting platform designed to demonstrate secure voter authentication, encrypted ballot storage, duplicate-vote prevention and verifiable election auditing across Kenya's national and devolved electoral structure.</p><div class="hero-actions d-flex flex-wrap gap-2 mt-4">{% if not session.get('user_id') %}<a href="{{ url_for('register') }}" class="btn btn-emerald btn-lg">Register to Vote</a><a href="{{ url_for('login') }}" class="btn btn-outline-parchment btn-lg">Voter Login</a>{% else %}<a href="{{ url_for('vote') }}" class="btn btn-emerald btn-lg">Open My Ballot</a>{% endif %}<a href="{{ url_for('results') }}" class="btn btn-outline-parchment btn-lg">Election Audit</a></div></div><div class="col-lg-4 text-center"><svg viewBox="0 0 300 250" width="100%" style="max-width:285px" xmlns="http://www.w3.org/2000/svg"><ellipse cx="150" cy="225" rx="92" ry="11" fill="#000" opacity=".16"/><path d="M150 25l75 28v54c0 51-31 88-75 111-44-23-75-60-75-111V53z" fill="#0c8a5f"/><path d="M150 25v193c44-23 75-60 75-111V53z" fill="#08704e"/><rect x="105" y="92" width="90" height="68" rx="8" fill="#f7f5ef"/><path d="M118 91l32-25 32 25" fill="#d9a441"/><path d="M129 124l14 14 31-35" fill="none" stroke="#0c8a5f" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg></div></div></div>
+<div class="status-strip mb-4"><div class="row g-3 align-items-center"><div class="col-lg-6"><div class="status-label">Current Election</div><strong>{{ election.title }}</strong>{% if election.election_date %}<span class="text-muted"> &middot; {{ election.election_date.strftime('%d %B %Y') }}</span>{% endif %}</div><div class="col-lg-6 text-lg-end"><span class="badge {{ 'text-bg-success' if voting_open else 'text-bg-secondary' }} me-1">Voting {{ 'Open' if voting_open else 'Closed' }}</span><span class="badge {{ 'text-bg-success' if election.results_visible else 'text-bg-secondary' }}">Results {{ 'Released' if election.results_visible else 'Not Released' }}</span></div></div></div>
+{% if session.get('user_id') and current_user() and current_user().role != 'admin' %}{% set area = voter_area(current_user()) %}<div class="card border-0 shadow-sm mb-4"><div class="card-body py-3"><div class="d-flex flex-wrap align-items-center gap-3"><strong>Your Electoral Area</strong><span><strong>County:</strong> {{ area.county }}</span><span><strong>Constituency:</strong> {{ area.constituency }}</span><span><strong>Ward:</strong> {{ area.ward }}</span></div></div></div>{% endif %}
+<div class="row g-3 mb-4"><div class="col-md-4"><div class="feature-card card"><div class="feature-icon green">🔒</div><div class="feature-title">Encrypted Ballots</div><p class="feature-text">Ballot selections are encrypted before being stored, helping protect the confidentiality of recorded votes.</p></div></div><div class="col-md-4"><div class="feature-card card"><div class="feature-icon gold">⛓</div><div class="feature-title">Tamper-Evident Audit Chain</div><p class="feature-text">Each ballot is linked through cryptographic hashing, allowing unauthorised modification of stored ballot records to be detected.</p></div></div><div class="col-md-4"><div class="feature-card card"><div class="feature-icon navy">✓</div><div class="feature-title">Independent Verification</div><p class="feature-text">The audit dashboard provides election-integrity information without exposing an individual voter's ballot choice.</p></div></div></div>
+<div class="how-card mb-4"><h4 class="mb-3">How it works</h4><div class="d-flex flex-wrap gap-3 justify-content-between"><div class="step"><span class="step-num">1</span>Register</div><div class="step"><span class="step-num">2</span>Verify Email</div><div class="step"><span class="step-num">3</span>Sign In</div><div class="step"><span class="step-num">4</span>Cast Eligible Ballots</div><div class="step"><span class="step-num">5</span>Verify Election Audit</div></div></div>
+<div class="academic-note text-center"><strong>MSc Computer Science with Cybersecurity Project</strong><br>Secure Electronic Voting System Prototype &middot; Developed for academic demonstration and evaluation.</div>
 {% endblock %}
 """
-
 REGISTER_HTML = """
 {% extends "base.html" %}
 {% block content %}
@@ -1614,7 +1471,8 @@ app.jinja_loader = DictLoader({
 
 @app.route("/")
 def home():
-    return render_template_string(HOME_HTML)
+    election = get_election()
+    return render_template_string(HOME_HTML, election=election, voting_open=election_is_open(election))
 
 
 @app.route("/api/constituencies/<int:county_id>")
