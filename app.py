@@ -1306,10 +1306,10 @@ CANDIDATES_HTML = """
    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="add"><input type="hidden" name="contest_id" id="contest_id">
    <div class="mb-3"><label class="form-label">Full name</label><input class="form-control" name="name" required></div>
    <div class="mb-3"><label class="form-label">Political party</label><input class="form-control" name="party" required></div>
-   <div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" maxlength="10" required></div><div class="col"><label class="form-label">Candidate number</label><input class="form-control" name="candidate_number"></div></div>
+   <div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" maxlength="10" required></div><div class="col"><label class="form-label">Candidate number <span class="text-danger">*</span></label><input class="form-control" name="candidate_number" required></div></div>
    <div class="row g-3 mt-1">
-    <div class="col-md-6"><label class="form-label">Candidate photograph</label><input class="form-control" type="file" name="candidate_photo" id="candidate_photo" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"><div class="small text-muted mt-1">JPG, PNG or WebP; max 1 MB.</div><img id="candidatePreview" class="preview-img mt-2 d-none" alt="Candidate preview"></div>
-    <div class="col-md-6"><label class="form-label">Party symbol / logo</label><input class="form-control" type="file" name="party_symbol" id="party_symbol" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"><div class="small text-muted mt-1">JPG, PNG or WebP; max 1 MB.</div><img id="partyPreview" class="preview-img mt-2 d-none" alt="Party symbol preview"></div>
+    <div class="col-md-6"><label class="form-label">Candidate photograph</label><input class="form-control" type="file" name="candidate_photo" id="candidate_photo" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"><div class="small text-muted mt-1">JPG, PNG or WebP; max 1 MB.</div><div id="candidatePreviewWrap" class="d-none mt-2"><img id="candidatePreview" class="preview-img" alt="Candidate preview"><div><button type="button" id="removeCandidatePhoto" class="btn btn-sm btn-outline-danger mt-2">Remove image</button></div></div></div>
+    <div class="col-md-6"><label class="form-label">Party symbol / logo</label><input class="form-control" type="file" name="party_symbol" id="party_symbol" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"><div class="small text-muted mt-1">JPG, PNG or WebP; max 1 MB.</div><div id="partyPreviewWrap" class="d-none mt-2"><img id="partyPreview" class="preview-img" alt="Party symbol preview"><div><button type="button" id="removePartySymbol" class="btn btn-sm btn-outline-danger mt-2">Remove image</button></div></div></div>
    </div>
    <div class="my-3"><label class="form-label">Short manifesto/profile</label><textarea class="form-control" name="manifesto" rows="4"></textarea></div>
    <button class="btn btn-primary" id="addCandidate" disabled>Add Candidate</button>
@@ -1327,7 +1327,7 @@ CANDIDATES_HTML = """
 <div class="modal-body"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="edit"><input type="hidden" name="candidate_id" id="edit_id">
 <div class="mb-2"><label class="form-label">Full name</label><input class="form-control" name="name" id="edit_name" required></div>
 <div class="mb-2"><label class="form-label">Political party</label><input class="form-control" name="party" id="edit_party" required></div>
-<div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" id="edit_abbr" required></div><div class="col"><label class="form-label">Candidate number</label><input class="form-control" name="candidate_number" id="edit_number"></div></div>
+<div class="row g-2"><div class="col"><label class="form-label">Abbreviation</label><input class="form-control" name="abbreviation" id="edit_abbr" required></div><div class="col"><label class="form-label">Candidate number <span class="text-danger">*</span></label><input class="form-control" name="candidate_number" id="edit_number" required></div></div>
 <div class="mt-2"><label class="form-label">Short manifesto/profile</label><textarea class="form-control" name="manifesto" id="edit_manifesto" rows="3"></textarea></div>
 <div class="row g-2 mt-1"><div class="col"><label class="form-label">Replace candidate photo</label><input class="form-control" type="file" name="candidate_photo" accept=".jpg,.jpeg,.png,.webp"></div><div class="col"><label class="form-label">Replace party symbol</label><input class="form-control" type="file" name="party_symbol" accept=".jpg,.jpeg,.png,.webp"></div></div>
 </div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary">Save Changes</button></div></form>
@@ -1347,8 +1347,9 @@ function chooseContest(){let p=pos.value,c=null;if(p==='President')c=contests.fi
 function renderRows(){let q=search.value.trim().toLowerCase(),rows=currentRows.filter(r=>!q||[r.name,r.party,r.abbreviation,r.candidate_number].join(' ').toLowerCase().includes(q)),box=document.getElementById('candidateRows');if(!rows.length){box.innerHTML='<div class="text-muted">'+(currentRows.length?'No candidates match your search.':'No candidates registered for this contest yet.')+'</div>';return;}box.innerHTML=rows.map(r=>`<div class="candidate-card"><div class="d-flex gap-3 align-items-center">${r.photo_data?`<img class="candidate-photo" src="${r.photo_data}" alt="">`:`<div class="candidate-photo d-flex align-items-center justify-content-center text-muted">Photo</div>`}<div class="flex-grow-1"><div class="d-flex justify-content-between gap-2"><div><strong>${esc(r.name)}</strong>${r.candidate_number?` <span class="badge text-bg-light">No. ${esc(r.candidate_number)}</span>`:''}<div class="text-muted">${esc(r.party)} (${esc(r.abbreviation)})</div></div>${r.party_symbol_data?`<img class="party-symbol" src="${r.party_symbol_data}" alt="">`:''}</div><div class="mt-2"><span class="badge ${r.status==='active'?'text-bg-success':'text-bg-secondary'}">${esc(r.status.toUpperCase())}</span> <button type="button" class="btn btn-sm btn-outline-primary ms-1" onclick="openEditById(${r.id})">Edit</button><form method="POST" class="d-inline"><input type="hidden" name="csrf_token" value="${esc(csrf)}"><input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="${r.id}"><button class="btn btn-sm btn-outline-secondary ms-1">${r.status==='active'?'Withdraw':'Reactivate'}</button></form></div></div></div></div>`).join('');}
 function openEditById(id){let r=currentRows.find(x=>String(x.id)===String(id));if(!r)return;document.getElementById('edit_id').value=r.id;document.getElementById('edit_name').value=r.name||'';document.getElementById('edit_party').value=r.party||'';document.getElementById('edit_abbr').value=r.abbreviation||'';document.getElementById('edit_number').value=r.candidate_number||'';document.getElementById('edit_manifesto').value=r.manifesto||'';bootstrap.Modal.getOrCreateInstance(document.getElementById('editCandidateModal')).show();}
 function esc(v){return String(v??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
-function preview(input,img){input.addEventListener('change',()=>{let f=input.files[0];if(!f){img.classList.add('d-none');return}let u=URL.createObjectURL(f);img.src=u;img.classList.remove('d-none');});}
-preview(document.getElementById('candidate_photo'),document.getElementById('candidatePreview'));preview(document.getElementById('party_symbol'),document.getElementById('partyPreview'));
+function preview(input,img,wrap,removeBtn){let objectUrl=null;function clearSelection(){if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null;}input.value='';img.removeAttribute('src');wrap.classList.add('d-none');}input.addEventListener('change',()=>{if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null;}let f=input.files[0];if(!f){clearSelection();return;}objectUrl=URL.createObjectURL(f);img.src=objectUrl;wrap.classList.remove('d-none');});removeBtn.addEventListener('click',clearSelection);}
+preview(document.getElementById('candidate_photo'),document.getElementById('candidatePreview'),document.getElementById('candidatePreviewWrap'),document.getElementById('removeCandidatePhoto'));
+preview(document.getElementById('party_symbol'),document.getElementById('partyPreview'),document.getElementById('partyPreviewWrap'),document.getElementById('removePartySymbol'));
 pos.addEventListener('change',refreshGeo);county.addEventListener('change',refreshCon);con.addEventListener('change',refreshWard);ward.addEventListener('change',chooseContest);search.addEventListener('input',renderRows);positions();refreshGeo();
 </script>
 {% endblock %}
@@ -1831,6 +1832,17 @@ def uploaded_image_data_url(field_name):
         raise ValueError("The uploaded file does not appear to be a valid image.")
     return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
 
+def candidate_number_in_election(election_id, candidate_number, exclude_candidate_id=None):
+    """Return True when a candidate number is already used anywhere in this election."""
+    q = (db.session.query(Candidate.id)
+         .join(ContestCandidate, ContestCandidate.candidate_id == Candidate.id)
+         .join(Contest, Contest.id == ContestCandidate.contest_id)
+         .filter(Contest.election_id == election_id,
+                 Candidate.candidate_number == candidate_number))
+    if exclude_candidate_id is not None:
+        q = q.filter(Candidate.id != exclude_candidate_id)
+    return q.first() is not None
+
 @app.route("/admin/candidates", methods=["GET", "POST"])
 @admin_required
 def manage_candidates():
@@ -1844,26 +1856,36 @@ def manage_candidates():
             contest=Contest.query.filter_by(id=int(cr), election_id=election.id, active=True).first() if cr.isdigit() else None
             if not contest:
                 flash("Select a valid contest in the current election.","danger"); return redirect(url_for("manage_candidates"))
+            candidate_number=request.form.get("candidate_number","").strip()
+            if not candidate_number:
+                flash("Candidate number is required.","danger"); return redirect(url_for("manage_candidates"))
+            if candidate_number_in_election(election.id, candidate_number):
+                flash(f"Candidate number {candidate_number} is already in use for this election.","danger"); return redirect(url_for("manage_candidates"))
             if name and party and abbr:
                 try:
                     photo=uploaded_image_data_url("candidate_photo"); symbol=uploaded_image_data_url("party_symbol")
                 except ValueError as exc:
                     flash(str(exc),"danger"); return redirect(url_for("manage_candidates"))
-                c=Candidate(name=name,party=party,abbreviation=abbr,candidate_number=request.form.get("candidate_number","").strip() or None,manifesto=request.form.get("manifesto","").strip() or None,photo_data=photo,party_symbol_data=symbol,status="active")
+                c=Candidate(name=name,party=party,abbreviation=abbr,candidate_number=candidate_number,manifesto=request.form.get("manifesto","").strip() or None,photo_data=photo,party_symbol_data=symbol,status="active")
                 db.session.add(c); db.session.flush(); db.session.add(ContestCandidate(contest_id=contest.id,candidate_id=c.id)); db.session.commit()
                 log_event("CANDIDATE_CREATED","WARNING",user.id,f"{c.id}: {c.name}; contest={contest.id}; election={election.id}")
                 flash(f"Candidate added to {contest.position} — {contest_area_name(contest)}.","success"); return redirect(url_for("manage_candidates"))
-            flash("Name, party and abbreviation are required.","danger")
+            flash("Name, party, abbreviation and candidate number are required.","danger")
         elif action == "edit":
             cid=request.form.get("candidate_id",""); c=Candidate.query.get(int(cid)) if cid.isdigit() else None
             if c:
                 links=ContestCandidate.query.filter_by(candidate_id=c.id).all()
                 if not any(Contest.query.filter_by(id=l.contest_id,election_id=election.id).first() for l in links):
                     abort(403)
+                candidate_number=request.form.get("candidate_number","").strip()
+                if not candidate_number:
+                    flash("Candidate number is required.","danger"); return redirect(url_for("manage_candidates"))
+                if candidate_number_in_election(election.id, candidate_number, exclude_candidate_id=c.id):
+                    flash(f"Candidate number {candidate_number} is already in use for this election.","danger"); return redirect(url_for("manage_candidates"))
                 c.name=request.form.get("name","").strip() or c.name
                 c.party=request.form.get("party","").strip() or c.party
                 c.abbreviation=request.form.get("abbreviation","").strip().upper() or c.abbreviation
-                c.candidate_number=request.form.get("candidate_number","").strip() or None
+                c.candidate_number=candidate_number
                 c.manifesto=request.form.get("manifesto","").strip() or None
                 try:
                     photo=uploaded_image_data_url("candidate_photo"); symbol=uploaded_image_data_url("party_symbol")
