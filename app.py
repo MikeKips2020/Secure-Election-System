@@ -1300,7 +1300,7 @@ RESULTS_HTML = """
  <div class="row g-3">
   <div class="col-md-4"><label class="form-label fw-semibold" for="positionFilter">Electoral position</label><select id="positionFilter" class="form-select"><option value="">All positions</option>{% for position in result_positions %}<option value="{{position}}">{{position}}</option>{% endfor %}</select></div>
   <div class="col-md-4"><label class="form-label fw-semibold" for="countyFilter">County</label><select id="countyFilter" class="form-select"><option value="">All counties</option>{% for county in result_counties %}<option value="{{county}}">{{county}}</option>{% endfor %}</select></div>
-  <div class="col-md-4"><label class="form-label fw-semibold" for="areaFilter">Constituency / ward</label><select id="areaFilter" class="form-select"><option value="">All areas</option>{% for area in result_local_areas %}<option value="{{area}}">{{area}}</option>{% endfor %}</select></div>
+  <div class="col-md-4"><label class="form-label fw-semibold" for="areaFilter">Constituency / ward</label><select id="areaFilter" class="form-select"><option value="">All constituencies / wards</option></select></div>
  </div>
  <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3"><label class="form-check-label"><input class="form-check-input me-2" id="showEmpty" type="checkbox">Show contests without votes</label><button type="button" id="resetFilters" class="btn btn-outline-secondary btn-sm">Reset filters</button></div>
  <p id="resultsCount" class="small text-muted mb-0 mt-2" aria-live="polite"></p>
@@ -1323,16 +1323,51 @@ RESULTS_HTML = """
 {% if legacy_tally %}<div class="card border-warning mb-3"><div class="card-body"><h4>Legacy Demo Ballots</h4><p class="text-muted">These ballots pre-date V3 contest IDs and are preserved separately rather than being assigned to a constituency/ward contest retrospectively.</p>{% for cid,n in legacy_tally.items() %}<div>{{ legacy_candidates.get(cid).name if legacy_candidates.get(cid) else ('Candidate ID ' ~ cid) }}: <strong>{{n}}</strong></div>{% endfor %}</div></div>{% endif %}
 <script>
 (function(){
- const position=document.getElementById('positionFilter'),county=document.getElementById('countyFilter'),area=document.getElementById('areaFilter'),showEmpty=document.getElementById('showEmpty');
+ const position=document.getElementById('positionFilter');
+ const county=document.getElementById('countyFilter');
+ const area=document.getElementById('areaFilter');
+ const showEmpty=document.getElementById('showEmpty');
  const cards=Array.from(document.querySelectorAll('.results-contest'));
- function update(){
-  let count=0;
-  cards.forEach(card=>{const visible=(!position.value||card.dataset.position===position.value)&&(!county.value||card.dataset.county===county.value)&&(!area.value||card.dataset.area===area.value)&&(showEmpty.checked||Number(card.dataset.cast)>0);card.hidden=!visible;if(visible)count++;});
-  document.getElementById('resultsCount').textContent=count+' contest'+(count===1?'':'s')+' displayed';
-  document.getElementById('noMatchingResults').hidden=count!==0;
+ const countyWrap=county.closest('.col-md-4');
+ const areaWrap=area.closest('.col-md-4');
+ const nationalPositions=new Set(['President']);
+ function rebuildAreas(){
+   const previous=area.value;
+   const areas=[...new Set(cards.filter(card=>
+     (!position.value||card.dataset.position===position.value)&&
+     (!county.value||card.dataset.county===county.value)&&
+     card.dataset.area
+   ).map(card=>card.dataset.area))].sort((a,b)=>a.localeCompare(b));
+   area.replaceChildren(new Option('All constituencies / wards',''));
+   areas.forEach(name=>area.add(new Option(name,name)));
+   area.value=areas.includes(previous)?previous:'';
+   area.disabled=areas.length===0;
  }
- [position,county,area,showEmpty].forEach(el=>el.addEventListener('change',update));
- document.getElementById('resetFilters').addEventListener('click',()=>{position.value='';county.value='';area.value='';showEmpty.checked=false;update();});
+ function update(){
+   const national=nationalPositions.has(position.value);
+   countyWrap.hidden=national;
+   areaWrap.hidden=national;
+   if(national){county.value='';area.value='';}
+   rebuildAreas();
+   let count=0;
+   cards.forEach(card=>{
+     const visible=(!position.value||card.dataset.position===position.value)&&
+       (!county.value||card.dataset.county===county.value)&&
+       (!area.value||card.dataset.area===area.value)&&
+       (showEmpty.checked||Number(card.dataset.cast)>0);
+     card.hidden=!visible;
+     if(visible)count++;
+   });
+   document.getElementById('resultsCount').textContent=count+' contest'+(count===1?'':'s')+' displayed';
+   document.getElementById('noMatchingResults').hidden=count!==0;
+ }
+ position.addEventListener('change',update);
+ county.addEventListener('change',update);
+ area.addEventListener('change',update);
+ showEmpty.addEventListener('change',update);
+ document.getElementById('resetFilters').addEventListener('click',()=>{
+   position.value='';county.value='';area.value='';showEmpty.checked=false;update();
+ });
  update();
 })();
 </script>
@@ -2340,9 +2375,21 @@ def results():
             "eligible":eligible,"cast":cast,"turnout":(100.0*cast/eligible if eligible else 0.0),
             "county":county_obj.name if county_obj else "","local_area":(ward_obj.name if ward_obj else constituency_obj.name if constituency_obj else ""),
             "pie_parts":parts})
-    # Prioritise populated contests, then alphabetical position/area.
-    contest_results.sort(key=lambda r:(r["cast"]==0,r["contest"].position,r["area"]))
-    result_positions=sorted({r["contest"].position for r in contest_results})
+    # Electoral order is fixed: national presidential results always lead.
+    position_order = {
+        "President": 0, "Governor": 1, "Senator": 2,
+        "Woman Representative": 3, "Member of Parliament": 4,
+        "Member of County Assembly": 5,
+    }
+    contest_results.sort(key=lambda r: (
+        position_order.get(r["contest"].position, 99),
+        r["cast"] == 0,
+        r["area"].casefold(),
+    ))
+    result_positions=sorted(
+        {r["contest"].position for r in contest_results},
+        key=lambda p: (position_order.get(p, 99), p),
+    )
     result_counties=sorted({r["county"] for r in contest_results if r["county"]})
     result_local_areas=sorted({r["local_area"] for r in contest_results if r["local_area"]})
     legacy_candidates={c.id:c for c in Candidate.query.filter(Candidate.id.in_(list(legacy_tally.keys()) or [-1])).all()}
