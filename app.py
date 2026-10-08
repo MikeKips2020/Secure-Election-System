@@ -1169,21 +1169,114 @@ RESET_PASSWORD_HTML = """
 VOTE_HTML = """
 {% extends "base.html" %}
 {% block content %}
-<div class="row justify-content-center"><div class="col-lg-9">
+<style>
+.ballot-choice {
+  display:block; cursor:pointer; background:#f1f4f8; color:#12233d;
+  border:2px solid #8c99aa; border-radius:12px; padding:16px;
+  margin-top:12px; transition:background .15s,border-color .15s,box-shadow .15s;
+}
+.ballot-choice:hover {background:#e6eef5;border-color:#334e68}
+.ballot-choice:has(.ballot-radio:checked) {
+  background:#e0f3e9; border-color:#08784d; box-shadow:0 0 0 2px rgba(8,120,77,.15);
+}
+.ballot-choice .ballot-radio {
+  appearance:none; -webkit-appearance:none; flex:0 0 25px;
+  width:25px;height:25px;border:3px solid #334e68;
+  border-radius:50%;background:#fff;cursor:pointer;margin:0;
+}
+.ballot-choice .ballot-radio:checked {
+  border:7px solid #08784d;background:#fff;
+}
+.ballot-choice .ballot-radio:focus-visible {outline:3px solid #005fcc;outline-offset:3px}
+.ballot-choice .candidate-photo {width:140px;height:140px;object-fit:cover;border-radius:8px}
+.ballot-choice .party-logo {width:110px;height:110px;object-fit:contain;background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:3px}
+.ballot-choice .candidate-details {flex:1;min-width:120px}
+.ballot-choice .selected-indicator {display:none;color:#086442;font-weight:700}
+.ballot-choice:has(.ballot-radio:checked) .selected-indicator {display:inline}
+@media(max-width:600px) {
+  .ballot-choice .candidate-photo {width:80px;height:80px}
+  .ballot-choice .party-logo {width:65px;height:65px}
+  .ballot-choice {padding:12px}
+}
+</style>
+<div class="row justify-content-center"><div class="col-lg-10">
 <div class="card"><div class="card-body p-4">
 <h2>My General Election Ballot</h2>
-<p class="text-muted">You may vote once in each contest for which your registered County, Constituency and Ward make you eligible. Already-cast contests are locked.</p>
+<p class="text-muted">Choose one candidate per eligible contest. You can change or clear any choice before submitting. Once recorded, a contest is locked.</p>
 {% if not contest_rows %}<div class="alert alert-warning">No active contests are configured for your registered electoral area yet.</div>{% endif %}
-<form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<form method="POST" id="ballotForm">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 {% for row in contest_rows %}
-<div class="card mb-3"><div class="card-body">
-<div class="d-flex justify-content-between"><div><h4 class="mb-0">{{ row.contest.position }}</h4><small class="text-muted">{{ row.area }}</small></div>{% if row.cast %}<span class="badge text-bg-success align-self-start">VOTE RECORDED</span>{% endif %}</div>
-{% if row.cast %}<p class="mt-3 mb-0 text-muted">This contest is locked. Your candidate choice is not stored in the receipt.</p>
-{% elif not row.candidates %}<div class="alert alert-warning mt-3 mb-0">No active candidates have been registered for this contest.</div>
-{% else %}{% for c in row.candidates %}<div class="form-check border rounded p-3 mt-2"><div class="d-flex align-items-center gap-3"><input class="form-check-input ms-0" type="radio" name="contest_{{ row.contest.id }}" id="c{{row.contest.id}}_{{c.id}}" value="{{c.id}}">{% if c.photo_data %}<img src="{{c.photo_data}}" alt="" style="width: 192px; height: 192px;object-fit:cover;border-radius:8px">{% endif %}<label class="form-check-label flex-grow-1" for="c{{row.contest.id}}_{{c.id}}"><strong>{% if c.candidate_number %}No. {{c.candidate_number}} — {% endif %}{{c.name}}</strong><br><span class="text-muted">{{c.party}} ({{c.abbreviation}})</span></label>{% if c.party_symbol_data %}<img src="{{c.party_symbol_data}}" alt="" style="width: 164px; height: 164px;object-fit:contain;border:1px solid #ddd;border-radius:6px;padding:2px">{% endif %}</div></div>{% endfor %}{% endif %}
-</div></div>{% endfor %}
-{% if open_count %}<button class="btn btn-success w-100">Encrypt & Submit Selected Contest Votes</button><p class="small text-muted mt-2">You do not need to vote in every remaining contest in one visit.</p>{% endif %}
-</form></div></div></div></div>
+<section class="card mb-4"><div class="card-body">
+<div class="d-flex justify-content-between gap-2">
+  <div><h4 class="mb-0">{{ row.contest.position }}</h4><small class="text-muted">{{ row.area }}</small></div>
+  {% if row.cast %}<span class="badge text-bg-success align-self-start">VOTE RECORDED</span>{% endif %}
+</div>
+{% if row.cast %}
+<p class="mt-3 mb-0 text-muted">This contest is locked. Your candidate choice is not stored in the receipt.</p>
+{% elif not row.candidates %}
+<div class="alert alert-warning mt-3 mb-0">No active candidates have been registered for this contest.</div>
+{% else %}
+<fieldset class="mt-2" aria-label="{{ row.contest.position }} candidate choices">
+{% for c in row.candidates %}
+<label class="ballot-choice" for="c{{row.contest.id}}_{{c.id}}">
+ <span class="d-flex align-items-center gap-3 flex-wrap flex-sm-nowrap">
+  <input class="ballot-radio" type="radio" name="contest_{{ row.contest.id }}" id="c{{row.contest.id}}_{{c.id}}" value="{{c.id}}" aria-label="{{ c.name }}">
+  {% if c.photo_data %}<img class="candidate-photo" src="{{c.photo_data}}" alt="Candidate photograph">{% endif %}
+  <span class="candidate-details"><strong>{% if c.candidate_number %}No. {{c.candidate_number}} — {% endif %}{{c.name}}</strong><span class="d-block text-secondary">{{c.party}} ({{c.abbreviation}})</span><span class="selected-indicator">✓ Selected</span></span>
+  {% if c.party_symbol_data %}<img class="party-logo" src="{{c.party_symbol_data}}" alt="Party symbol">{% endif %}
+ </span>
+</label>
+{% endfor %}
+</fieldset>
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3">
+ <span class="selection-status text-secondary small" data-contest="{{row.contest.id}}" aria-live="polite">No candidate selected</span>
+ <button type="button" class="btn btn-outline-secondary clear-contest" data-contest="{{row.contest.id}}" disabled>↶ Clear Selection</button>
+</div>
+{% endif %}
+</div></section>
+{% endfor %}
+{% if open_count %}
+<button type="submit" class="btn btn-success btn-lg w-100">Review &amp; Submit Selected Votes</button>
+<p class="small text-muted mt-2">Only selected contests will be submitted. Unselected contests remain available for later.</p>
+{% endif %}
+</form>
+</div></div></div></div>
+<script>
+(function(){
+ const form=document.getElementById('ballotForm');
+ if(!form)return;
+ function refresh(){
+  form.querySelectorAll('.clear-contest').forEach(button=>{
+   const id=button.dataset.contest;
+   const radios=[...form.querySelectorAll('input[name="contest_'+id+'"]')];
+   const chosen=radios.find(r=>r.checked);
+   button.disabled=!chosen;
+   const status=form.querySelector('.selection-status[data-contest="'+id+'"]');
+   if(status)status.textContent=chosen?'Candidate selected — you may change or clear it':'No candidate selected';
+  });
+ }
+ form.addEventListener('change',refresh);
+ form.querySelectorAll('.clear-contest').forEach(button=>{
+  button.addEventListener('click',()=>{
+   form.querySelectorAll('input[name="contest_'+button.dataset.contest+'"]').forEach(r=>{r.checked=false});
+   refresh();
+  });
+ });
+ form.addEventListener('submit',event=>{
+  const chosen=[...form.querySelectorAll('.ballot-radio:checked')];
+  if(!chosen.length){event.preventDefault();alert('Please select at least one candidate before submitting.');return;}
+  const summary=chosen.map(r=>{
+   const card=r.closest('.card');
+   const position=card?.querySelector('h4')?.textContent.trim()||'Contest';
+   const candidate=r.closest('.ballot-choice')?.querySelector('.candidate-details strong')?.textContent.trim()||'Candidate';
+   return position+': '+candidate;
+  }).join('\\n');
+  if(!confirm('Please review your selections:\\n\\n'+summary+'\\n\\nSubmit these votes? Once recorded, they cannot be changed.'))event.preventDefault();
+ });
+ refresh();
+})();
+</script>
 {% endblock %}
 """
 RESULTS_HTML = """
