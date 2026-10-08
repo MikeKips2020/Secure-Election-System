@@ -1281,13 +1281,61 @@ VOTE_HTML = """
 """
 RESULTS_HTML = """
 {% extends "base.html" %}{% block content %}
-<div class="card mb-4"><div class="card-body p-4"><div class="d-flex justify-content-between"><div><h2>{{ '🟢 ELECTION OPEN' if election_open else '🔴 ELECTION CLOSED' }}</h2><p class="mb-1"><strong>{{total_votes}}</strong> encrypted ballot records in the ledger.</p><p class="mb-0">Integrity: <span class="badge {{'text-bg-success' if integrity_status=='VALID' else 'text-bg-danger'}}">{{integrity_status.replace('_',' ')}}</span> &middot; {{verified_count}} verified</p></div><span class="badge {{'text-bg-success' if election_open else 'text-bg-secondary'}} align-self-start">{{'OPEN' if election_open else 'CLOSED'}}</span></div></div></div>
+<div class="card mb-4"><div class="card-body p-4"><div class="d-flex justify-content-between gap-3 flex-wrap"><div><h2>{{ '🟢 ELECTION OPEN' if election_open else '🔴 ELECTION CLOSED' }}</h2><p class="mb-1"><strong>{{total_votes}}</strong> encrypted ballot records in the ledger.</p><p class="mb-0">Integrity: <span class="badge {{'text-bg-success' if integrity_status=='VALID' else 'text-bg-danger'}}">{{integrity_status.replace('_',' ')}}</span> &middot; {{verified_count}} verified</p></div><span class="badge {{'text-bg-success' if election_open else 'text-bg-secondary'}} align-self-start">{{'OPEN' if election_open else 'CLOSED'}}</span></div></div></div>
 {% if election_open %}<div class="alert alert-info">Candidate standings are hidden while polls are open.</div>
 {% elif not show_candidate_results %}<div class="alert alert-warning">Voting is closed, but the administrator has not released final results.</div>
 {% else %}
-<h3>Final Results by Contest</h3><p class="text-muted">Turnout is calculated separately for each contest, so it cannot exceed 100% merely because each voter has several ballot papers.</p>
-{% for r in contest_results %}<div class="card mb-3"><div class="card-body"><div class="d-flex justify-content-between flex-wrap"><div><h4 class="mb-0">{{r.contest.position}}</h4><span class="text-muted">{{r.area}}</span></div><div class="text-end"><strong>{{'%.1f'|format(r.turnout)}}%</strong> turnout<br><small>{{r.cast}} ballots / {{r.eligible}} eligible voters</small></div></div><hr>{% for c in r.candidates %}<div class="d-flex justify-content-between border-bottom py-2"><span><strong>{{c.name}}</strong> <small class="text-muted">{{c.party}} ({{c.abbreviation}})</small></span><strong>{{r.tally.get(c.id,0)}}</strong></div>{% else %}<p class="text-muted mb-0">No active candidates registered.</p>{% endfor %}</div></div>{% endfor %}
+<style>
+.results-controls{background:#fff;border:1px solid #e4e0d3;border-radius:12px;padding:1.2rem;margin-bottom:1.2rem}
+.results-pie{width:220px;height:220px;max-width:100%;border-radius:50%;position:relative;flex-shrink:0;background:#e7ebef}
+.results-pie::after{content:'';position:absolute;inset:34%;background:white;border-radius:50%}
+.results-legend{min-width:230px;flex:1}.results-swatch{width:12px;height:12px;display:inline-block;border-radius:3px;margin-right:9px;flex-shrink:0}
+.results-legend-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:.48rem 0;border-bottom:1px solid #edf0f2}
+.results-contest[hidden]{display:none!important}.results-empty{color:#5c6777}
+@media(max-width:575px){.results-pie{width:185px;height:185px}.results-chart-layout{justify-content:center}}
+</style>
+<h3>Final Results by Contest</h3>
+<p class="text-muted">Each pie chart shows the percentage of valid recorded votes for its contest. Turnout is calculated separately using eligible voters.</p>
+<div class="results-controls">
+ <div class="row g-3">
+  <div class="col-md-4"><label class="form-label fw-semibold" for="positionFilter">Electoral position</label><select id="positionFilter" class="form-select"><option value="">All positions</option>{% for position in result_positions %}<option value="{{position}}">{{position}}</option>{% endfor %}</select></div>
+  <div class="col-md-4"><label class="form-label fw-semibold" for="countyFilter">County</label><select id="countyFilter" class="form-select"><option value="">All counties</option>{% for county in result_counties %}<option value="{{county}}">{{county}}</option>{% endfor %}</select></div>
+  <div class="col-md-4"><label class="form-label fw-semibold" for="areaFilter">Constituency / ward</label><select id="areaFilter" class="form-select"><option value="">All areas</option>{% for area in result_local_areas %}<option value="{{area}}">{{area}}</option>{% endfor %}</select></div>
+ </div>
+ <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3"><label class="form-check-label"><input class="form-check-input me-2" id="showEmpty" type="checkbox">Show contests without votes</label><button type="button" id="resetFilters" class="btn btn-outline-secondary btn-sm">Reset filters</button></div>
+ <p id="resultsCount" class="small text-muted mb-0 mt-2" aria-live="polite"></p>
+</div>
+{% for r in contest_results %}
+<div class="card mb-3 results-contest" data-position="{{r.contest.position|e}}" data-county="{{r.county|e}}" data-area="{{r.local_area|e}}" data-cast="{{r.cast}}">
+ <div class="card-body p-3 p-md-4">
+  <div class="d-flex justify-content-between gap-2 flex-wrap"><div><h4 class="mb-0">{{r.contest.position}}</h4><span class="text-muted">{{r.area}}</span></div><div class="text-md-end"><strong>{{'%.1f'|format(r.turnout)}}%</strong> turnout<br><small>{{r.cast}} ballots / {{r.eligible}} eligible voters</small></div></div>
+  {% if r.cast and r.candidates %}
+  <div class="d-flex flex-wrap gap-4 align-items-center mt-3 results-chart-layout">
+   <div class="results-pie" role="img" aria-label="Vote share pie chart for {{r.contest.position}} in {{r.area}}" style="background:conic-gradient({% for part in r.pie_parts %}{{part.color}} {{'%.5f'|format(part.start)}}% {{'%.5f'|format(part.end)}}%{% if not loop.last %}, {% endif %}{% endfor %})"></div>
+   <div class="results-legend">{% for part in r.pie_parts %}<div class="results-legend-row"><span class="d-flex align-items-center"><span class="results-swatch" style="background:{{part.color}}"></span><span><strong>{{part.candidate.name}}</strong><br><small class="text-muted">{{part.candidate.party}} ({{part.candidate.abbreviation}})</small></span></span><span class="text-end text-nowrap"><strong>{{part.votes}}</strong> votes<br><small>{{'%.1f'|format(part.percent)}}%</small></span></div>{% endfor %}</div>
+  </div>
+  {% elif r.cast %}<p class="results-empty mt-3 mb-0">Ballots exist for this contest, but no active candidates are available to display. Please review the audit and candidate records.</p>
+  {% else %}<p class="results-empty mt-3 mb-0">No ballots recorded for this contest.</p>{% endif %}
+ </div>
+</div>
+{% endfor %}
+<p id="noMatchingResults" class="alert alert-light border" hidden>No contests match these filters. Try another position or area, or enable “Show contests without votes”.</p>
 {% if legacy_tally %}<div class="card border-warning mb-3"><div class="card-body"><h4>Legacy Demo Ballots</h4><p class="text-muted">These ballots pre-date V3 contest IDs and are preserved separately rather than being assigned to a constituency/ward contest retrospectively.</p>{% for cid,n in legacy_tally.items() %}<div>{{ legacy_candidates.get(cid).name if legacy_candidates.get(cid) else ('Candidate ID ' ~ cid) }}: <strong>{{n}}</strong></div>{% endfor %}</div></div>{% endif %}
+<script>
+(function(){
+ const position=document.getElementById('positionFilter'),county=document.getElementById('countyFilter'),area=document.getElementById('areaFilter'),showEmpty=document.getElementById('showEmpty');
+ const cards=Array.from(document.querySelectorAll('.results-contest'));
+ function update(){
+  let count=0;
+  cards.forEach(card=>{const visible=(!position.value||card.dataset.position===position.value)&&(!county.value||card.dataset.county===county.value)&&(!area.value||card.dataset.area===area.value)&&(showEmpty.checked||Number(card.dataset.cast)>0);card.hidden=!visible;if(visible)count++;});
+  document.getElementById('resultsCount').textContent=count+' contest'+(count===1?'':'s')+' displayed';
+  document.getElementById('noMatchingResults').hidden=count!==0;
+ }
+ [position,county,area,showEmpty].forEach(el=>el.addEventListener('change',update));
+ document.getElementById('resetFilters').addEventListener('click',()=>{position.value='';county.value='';area.value='';showEmpty.checked=false;update();});
+ update();
+})();
+</script>
 {% endif %}
 {% if integrity_status=='HASH_FAILURE' %}<div class="alert alert-danger">Hash-chain verification failed at vote ID {{break_point}}.</div>{% elif integrity_status=='DECRYPTION_FAILURE' %}<div class="alert alert-warning">Vote ID {{break_point}} could not be decrypted with the configured key. This is reported separately from hash-chain tampering.</div>{% endif %}
 {% endblock %}
@@ -2265,16 +2313,44 @@ def results():
         verified_count += 1; previous_hash=v.current_hash
 
     contest_results=[]
+    pie_colors=["#0c8a5f","#d9a441","#305f9e","#b3423a","#7954a3","#169ca7","#cc6b32","#687b8e"]
     for contest in Contest.query.filter_by(active=True,election_id=election.id).order_by(Contest.position,Contest.id).all():
         candidates=candidates_for_contest(contest.id); tally=contest_tallies.get(contest.id,{})
         eligible=registered_voters_for_contest(contest); cast=verified_contest_ballots.get(contest.id,0)
+        county_obj=db.session.get(Region,contest.county_id) if contest.county_id else None
+        constituency_obj=db.session.get(Constituency,contest.constituency_id) if contest.constituency_id else None
+        ward_obj=db.session.get(Ward,contest.ward_id) if contest.ward_id else None
+        if not county_obj and constituency_obj:
+            county_obj=db.session.get(Region,constituency_obj.county_id)
+        if not constituency_obj and ward_obj:
+            constituency_obj=db.session.get(Constituency,ward_obj.constituency_id)
+            if constituency_obj and not county_obj:
+                county_obj=db.session.get(Region,constituency_obj.county_id)
+        parts=[]; offset=0.0
+        # The pie denominator is the number of votes for displayed candidates;
+        # preserve the recorded ballot count separately for audit/turnout.
+        displayed_total=sum(tally.get(c.id,0) for c in candidates)
+        for i,c in enumerate(candidates):
+            n=tally.get(c.id,0)
+            share=(100.0*n/displayed_total) if displayed_total else 0.0
+            end=offset+share
+            parts.append({"candidate":c,"votes":n,"percent":share,"start":offset,"end":end,"color":pie_colors[i%len(pie_colors)]})
+            offset=end
         contest_results.append({"contest":contest,"area":contest_area_name(contest),"candidates":candidates,"tally":tally,
-            "eligible":eligible,"cast":cast,"turnout":(100.0*cast/eligible if eligible else 0.0)})
+            "eligible":eligible,"cast":cast,"turnout":(100.0*cast/eligible if eligible else 0.0),
+            "county":county_obj.name if county_obj else "","local_area":(ward_obj.name if ward_obj else constituency_obj.name if constituency_obj else ""),
+            "pie_parts":parts})
+    # Prioritise populated contests, then alphabetical position/area.
+    contest_results.sort(key=lambda r:(r["cast"]==0,r["contest"].position,r["area"]))
+    result_positions=sorted({r["contest"].position for r in contest_results})
+    result_counties=sorted({r["county"] for r in contest_results if r["county"]})
+    result_local_areas=sorted({r["local_area"] for r in contest_results if r["local_area"]})
     legacy_candidates={c.id:c for c in Candidate.query.filter(Candidate.id.in_(list(legacy_tally.keys()) or [-1])).all()}
     return render_template_string(RESULTS_HTML, election=election,election_open=election_is_open(election),is_admin=is_admin,
         show_candidate_results=((not election_is_open(election)) and election.results_visible),total_votes=len(votes),verified_count=verified_count,
         invalid_ballots=invalid_ballots,break_point=break_point,integrity_status=integrity_status,contest_results=contest_results,
-        legacy_tally=legacy_tally,legacy_candidates=legacy_candidates)
+        legacy_tally=legacy_tally,legacy_candidates=legacy_candidates,
+        result_positions=result_positions,result_counties=result_counties,result_local_areas=result_local_areas)
 
 
 @app.route("/admin/audit/clear-view", methods=["POST"])
