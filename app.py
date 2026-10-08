@@ -970,7 +970,8 @@ BASE_HTML = """
         {% if current_user() and current_user().role == 'admin' %}
         <a class="btn btn-warning btn-sm" href="{{ url_for('admin_dashboard') }}">Admin</a>
         {% else %}
-        <a class="btn btn-emerald btn-sm" href="{{ url_for('vote') }}">My Ballot</a>
+        <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('voter_dashboard') }}">Dashboard</a>
+         <a class="btn btn-emerald btn-sm" href="{{ url_for('vote') }}">My Ballot</a>
         {% endif %}
         <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('logout') }}">Logout ({{ session.get('user_name') }})</a>
       {% else %}
@@ -1447,9 +1448,61 @@ AUDIT_LOG_HTML = """
 </div></div>{% endblock %}
 """
 
+
+VOTER_DASHBOARD_HTML = """
+{% extends "base.html" %}
+{% block title %}Voter Dashboard — Kenya Secure E-Voting{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-9">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+      <div><h2 class="mb-1">Welcome, {{ user.full_name }}</h2>
+      <p class="text-muted mb-0">{{ election.title }}</p></div>
+      <span class="badge {{ 'text-bg-success' if voting_open else 'text-bg-secondary' }} fs-6">
+        Voting {{ 'OPEN' if voting_open else 'CLOSED' }}</span>
+    </div>
+    <div class="card mb-3"><div class="card-body">
+      <h5>Your Electoral Area</h5>
+      <div class="row g-2">
+        <div class="col-md-4"><strong>County</strong><br>{{ area.county }}</div>
+        <div class="col-md-4"><strong>Constituency</strong><br>{{ area.constituency }}</div>
+        <div class="col-md-4"><strong>Ward</strong><br>{{ area.ward }}</div>
+      </div>
+    </div></div>
+    <div class="row g-3 mb-3">
+      <div class="col-sm-6"><div class="card"><div class="card-body">
+        <div class="text-muted">Eligible contests</div><div class="display-6">{{ eligible_count }}</div>
+      </div></div></div>
+      <div class="col-sm-6"><div class="card"><div class="card-body">
+        <div class="text-muted">Ballots submitted</div>
+        <div class="display-6">{{ completed_count }} / {{ eligible_count }}</div>
+      </div></div></div>
+    </div>
+    <div class="card"><div class="card-body">
+      <h4>My Ballot</h4>
+      <p class="text-muted">Choose when to open your ballot. Each eligible contest can be voted in once.</p>
+      {% if voting_open %}
+        {% if eligible_count > completed_count %}
+          <a class="btn btn-emerald btn-lg" href="{{ url_for('vote') }}">Open My Ballot &rarr;</a>
+        {% elif eligible_count > 0 %}
+          <div class="alert alert-success mb-0">All your eligible ballots have been submitted.</div>
+        {% else %}
+          <div class="alert alert-warning mb-0">No eligible contests were found for your electoral area.</div>
+        {% endif %}
+      {% else %}
+        <div class="alert alert-secondary mb-0">Voting is currently closed. Your ballot is unavailable.</div>
+      {% endif %}
+      <div class="mt-3"><a href="{{ url_for('results') }}">View Election Audit &amp; Results</a></div>
+    </div></div>
+  </div>
+</div>
+{% endblock %}
+"""
+
 app.jinja_loader = DictLoader({
     "base.html": BASE_HTML,
     "home.html": HOME_HTML,
+    "voter_dashboard.html": VOTER_DASHBOARD_HTML,
     "register.html": REGISTER_HTML,
     "login.html": LOGIN_HTML,
     "forgot_password.html": FORGOT_PASSWORD_HTML,
@@ -1474,6 +1527,31 @@ app.jinja_loader = DictLoader({
 def home():
     election = get_election()
     return render_template_string(HOME_HTML, election=election, voting_open=election_is_open(election))
+
+
+
+@app.route("/voter-dashboard")
+@login_required
+def voter_dashboard():
+    user = current_user()
+    if not user:
+        session.clear()
+        return redirect(url_for("login"))
+    if user.role == "admin":
+        return redirect(url_for("admin_dashboard"))
+    election = get_election()
+    contests = eligible_contests_for(user)
+    contest_ids = [contest.id for contest in contests]
+    completed_count = (BallotReceipt.query.filter(
+        BallotReceipt.user_id == user.id,
+        BallotReceipt.contest_id.in_(contest_ids)
+    ).count() if contest_ids else 0)
+    return render_template_string(
+        VOTER_DASHBOARD_HTML,
+        user=user, election=election, area=voter_area(user),
+        voting_open=election_is_open(election),
+        eligible_count=len(contests), completed_count=completed_count
+    )
 
 
 @app.route("/api/constituencies/<int:county_id>")
@@ -1648,7 +1726,7 @@ def login():
             return redirect(url_for("admin_dashboard"))
         # V3 completion is per contest via BallotReceipt. The legacy global
         # User.has_voted flag must not block a voter from remaining contests.
-        return redirect(url_for("vote"))
+        return redirect(url_for("voter_dashboard"))
 
     return render_template_string(LOGIN_HTML)
 
