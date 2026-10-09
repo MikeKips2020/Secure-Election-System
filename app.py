@@ -971,7 +971,7 @@ BASE_HTML = """
         <a class="btn btn-warning btn-sm" href="{{ url_for('admin_dashboard') }}">Admin</a>
         {% else %}
         <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('voter_dashboard') }}">Dashboard</a>
-         <a class="btn btn-emerald btn-sm" href="{{ url_for('vote') }}">My Ballot</a>
+         <a class="btn btn-emerald btn-sm" href="{{ url_for('voter_dashboard') }}">My Ballot</a>
         {% endif %}
         <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('logout') }}">Logout ({{ session.get('user_name') }})</a>
       {% else %}
@@ -1668,6 +1668,19 @@ VOTER_DASHBOARD_HTML = """
       {% else %}
         <div class="alert alert-secondary mb-0">Voting is currently closed. Your ballot is unavailable.</div>
       {% endif %}
+      {% if contest_statuses %}
+      <hr class="my-3">
+      <h5>My contest submission status</h5>
+      <p class="text-muted small">This shows whether a vote was recorded for each eligible contest, without revealing your candidate selections.</p>
+      <div class="list-group mb-3">
+        {% for item in contest_statuses %}
+        <div class="list-group-item d-flex justify-content-between align-items-center gap-2">
+          <span>{{ item.position }}</span>
+          <span class="badge {{ 'text-bg-success' if item.recorded else 'text-bg-secondary' }}">{{ 'Vote recorded' if item.recorded else 'Not submitted' }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
       <div class="mt-3"><a href="{{ url_for('results') }}">View Election Audit &amp; Results</a></div>
     </div></div>
   </div>
@@ -1722,9 +1735,20 @@ def voter_dashboard():
         BallotReceipt.user_id == user.id,
         BallotReceipt.contest_id.in_(contest_ids)
     ).count() if contest_ids else 0)
+    recorded_ids = set(
+        row.contest_id for row in BallotReceipt.query.filter(
+            BallotReceipt.user_id == user.id,
+            BallotReceipt.contest_id.in_(contest_ids)
+        ).all()
+    ) if contest_ids else set()
+    contest_statuses = [
+        {"position": contest.position, "recorded": contest.id in recorded_ids}
+        for contest in contests
+    ]
     return render_template_string(
         VOTER_DASHBOARD_HTML,
         user=user, election=election, area=voter_area(user),
+        contest_statuses=contest_statuses,
         voting_open=election_is_open(election),
         eligible_count=len(contests), completed_count=completed_count
     )
@@ -2006,7 +2030,7 @@ def vote():
         session.clear(); return redirect(url_for("login"))
     election = get_election()
     if not election_is_open(election):
-        flash("Voting is currently closed for this election.", "warning"); return redirect(url_for("results"))
+        flash("Voting is closed. You can review your ballot submission status below.", "info"); return redirect(url_for("voter_dashboard"))
 
     contests = eligible_contests_for(user)
     if request.method == "POST":
