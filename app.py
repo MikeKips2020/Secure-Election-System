@@ -608,7 +608,7 @@ def migrate_database():
                 connection.execute(text("ALTER TABLE election_settings ADD COLUMN is_current BOOLEAN NOT NULL DEFAULT FALSE"))
                 connection.execute(text("UPDATE election_settings SET is_current = TRUE WHERE id = (SELECT MIN(id) FROM election_settings)"))
 
-    print("[INFO] Automatic database migration for Advanced Version 3.1.1 RC9 completed.")
+    print("[INFO] Automatic database migration for Advanced Version 3.1.1 RC10 completed.")
 
 
 
@@ -1672,11 +1672,20 @@ VOTER_DASHBOARD_HTML = """
       <hr class="my-3">
       <h5>My contest submission status</h5>
       <p class="text-muted small">This shows whether a vote was recorded for each eligible contest, without revealing your candidate selections.</p>
+      <style>
+        .contest-position-icon { display:inline-flex; align-items:center; justify-content:center; width:2rem; height:2rem; flex-shrink:0; border-radius:50%; background:#e8f4ef; color:#075e42; font-size:1.15rem; font-weight:800; border:1px solid #a6d4c1; }
+        @media (max-width: 480px) { .list-group-item { flex-wrap:wrap; } }
+      </style>
       <div class="list-group mb-3">
         {% for item in contest_statuses %}
         <div class="list-group-item d-flex justify-content-between align-items-center gap-2">
-          <span>{{ item.position }}</span>
-          <span class="badge {{ 'text-bg-success' if item.recorded else 'text-bg-secondary' }}">{{ 'Vote recorded' if item.recorded else 'Not submitted' }}</span>
+          <span class="d-flex align-items-center gap-2">
+            <span class="contest-position-icon" aria-hidden="true">{% if item.position == 'President' %}★{% elif item.position == 'Governor' %}◆{% elif item.position == 'Senator' %}▣{% elif item.position == 'Woman Representative' %}♀{% elif item.position == 'Member of Parliament' %}▤{% elif item.position == 'Member of County Assembly' %}⌂{% else %}●{% endif %}</span>
+            <strong>{{ item.position }}</strong>
+          </span>
+          <span class="badge {{ 'text-bg-success' if item.recorded else 'text-bg-danger' }} fs-6 py-2" aria-label="{{ item.position }}: {{ 'Vote recorded' if item.recorded else 'Not submitted' }}">
+            <span aria-hidden="true">{{ '✓' if item.recorded else '✕' }}</span> {{ 'Vote recorded' if item.recorded else 'Not submitted' }}
+          </span>
         </div>
         {% endfor %}
       </div>
