@@ -1456,6 +1456,46 @@ ADMIN_HTML = """
 """
 
 
+CANDIDATE_CONFIRMATION_HTML = """
+{% extends "base.html" %}
+{% block title %}Candidate Registration Confirmation{% endblock %}
+{% block content %}
+<div class="row justify-content-center"><div class="col-lg-9 col-xl-8">
+ <div class="card shadow-sm border-0"><div class="card-body p-4 p-md-5">
+  <div class="d-flex align-items-start gap-3 mb-4">
+   <span class="text-success" style="font-size:2.2rem" aria-hidden="true">&#10004;</span>
+   <div><h2 class="mb-1">Candidate Successfully Registered</h2>
+    <p class="text-muted mb-0">The candidate has been saved to the selected electoral contest.</p></div>
+  </div>
+  <div class="row g-4 mb-4"><div class="col-sm-auto">
+   {% if candidate.photo_data %}<img src="{{ candidate.photo_data }}" alt="Candidate photograph" class="rounded border" style="width:132px;height:132px;object-fit:cover">
+   {% else %}<div class="rounded border bg-light d-flex align-items-center justify-content-center text-secondary" style="width:132px;height:132px;font-size:3rem" aria-label="No candidate photograph">&#9786;</div>{% endif %}
+  </div><div class="col">
+   <h3 class="mb-1">{{ candidate.name }}</h3>
+   <p class="mb-1">{{ candidate.party }} ({{ candidate.abbreviation }})</p>
+   <p class="mb-2"><strong>Candidate number:</strong> {{ candidate.candidate_number }}</p>
+   <span class="badge {{ 'bg-success' if candidate.status == 'active' else 'bg-secondary' }}">{{ candidate.status|capitalize }}</span>
+   {% if candidate.party_symbol_data %}<div class="mt-3"><img src="{{ candidate.party_symbol_data }}" alt="Party symbol" class="rounded border" style="max-width:90px;max-height:90px;object-fit:contain"></div>{% endif %}
+  </div></div>
+  <div class="rounded border bg-light p-3 mb-4">
+   <dl class="row mb-0">
+    <dt class="col-sm-4">Election</dt><dd class="col-sm-8">{{ election.title }}</dd>
+    <dt class="col-sm-4">Position</dt><dd class="col-sm-8">{{ contest.position }}</dd>
+    <dt class="col-sm-4">Electoral area</dt><dd class="col-sm-8">{{ area }}</dd>
+    <dt class="col-sm-4">Candidate ID</dt><dd class="col-sm-8">{{ candidate.id }}</dd>
+   </dl>
+  </div>
+  {% if candidate.manifesto %}<h5>Candidate profile / manifesto</h5><p style="white-space:pre-wrap">{{ candidate.manifesto }}</p>{% endif %}
+  <div class="d-flex flex-wrap gap-2 mt-4">
+   <a class="btn btn-primary" href="{{ url_for('manage_candidates') }}">Add Another Candidate</a>
+   <a class="btn btn-outline-primary" href="{{ url_for('manage_candidates') }}">View / Manage Candidates</a>
+   <a class="btn btn-outline-secondary" href="{{ url_for('admin_dashboard') }}">Return to Admin Dashboard</a>
+  </div>
+ </div></div>
+</div></div>
+{% endblock %}
+"""
+
 CANDIDATES_HTML = """
 {% extends "base.html" %}
 {% block content %}
@@ -1710,6 +1750,7 @@ app.jinja_loader = DictLoader({
     "admin.html": ADMIN_HTML,
     "audit_log.html": AUDIT_LOG_HTML,
     "candidates.html": CANDIDATES_HTML,
+    "candidate_confirmation.html": CANDIDATE_CONFIRMATION_HTML,
     "regions.html": REGIONS_HTML,
     "geography_v3.html": GEOGRAPHY_V3,
     "contests_v3.html": CONTESTS_V3,
@@ -2130,6 +2171,17 @@ def candidate_number_in_election(election_id, candidate_number, exclude_candidat
         q = q.filter(Candidate.id != exclude_candidate_id)
     return q.first() is not None
 
+@app.route("/admin/candidates/confirmation/<int:candidate_id>/<int:contest_id>", methods=["GET"])
+@admin_required
+def candidate_confirmation(candidate_id, contest_id):
+    # Verify the candidate-to-contest relationship, rather than trusting URL IDs.
+    link = ContestCandidate.query.filter_by(candidate_id=candidate_id, contest_id=contest_id).first_or_404()
+    contest = Contest.query.get_or_404(link.contest_id)
+    candidate = Candidate.query.get_or_404(link.candidate_id)
+    election = ElectionSetting.query.get_or_404(contest.election_id)
+    return render_template_string(CANDIDATE_CONFIRMATION_HTML,
+        candidate=candidate, contest=contest, election=election, area=contest_area_name(contest))
+
 @app.route("/admin/candidates", methods=["GET", "POST"])
 @admin_required
 def manage_candidates():
@@ -2156,7 +2208,7 @@ def manage_candidates():
                 c=Candidate(name=name,party=party,abbreviation=abbr,candidate_number=candidate_number,manifesto=request.form.get("manifesto","").strip() or None,photo_data=photo,party_symbol_data=symbol,status="active")
                 db.session.add(c); db.session.flush(); db.session.add(ContestCandidate(contest_id=contest.id,candidate_id=c.id)); db.session.commit()
                 log_event("CANDIDATE_CREATED","WARNING",user.id,f"{c.id}: {c.name}; contest={contest.id}; election={election.id}")
-                flash(f"Candidate added to {contest.position} — {contest_area_name(contest)}.","success"); return redirect(url_for("manage_candidates"))
+                return redirect(url_for("candidate_confirmation", candidate_id=c.id, contest_id=contest.id))
             flash("Name, party, abbreviation and candidate number are required.","danger")
         elif action == "edit":
             cid=request.form.get("candidate_id",""); c=Candidate.query.get(int(cid)) if cid.isdigit() else None
