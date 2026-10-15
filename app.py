@@ -900,6 +900,69 @@ BASE_HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+
+<!-- RC10: shared selection feedback and duplicate-submit protection. -->
+<script>
+window.rc10 = (() => {
+ let pending=0, saved=[], navigation=false;
+ const requests=new Map();
+ function status(message,error=false){
+  let box=document.getElementById('rc10Status');
+  if(!box){box=document.createElement('div');box.id='rc10Status';box.setAttribute('role','status');box.setAttribute('aria-live','polite');box.style.cssText='position:fixed;bottom:1rem;right:1rem;z-index:2000;max-width:90vw;padding:1rem;background:white;border:1px solid #cbd9e7;border-radius:.6rem;box-shadow:0 4px 18px #0002';document.body.appendChild(box);}
+  box.replaceChildren();box.hidden=!message;
+  if(message&&!error){const spinner=document.createElement('span');spinner.className='spinner-border spinner-border-sm me-2';spinner.setAttribute('aria-hidden','true');box.appendChild(spinner);}
+  box.appendChild(document.createTextNode(message));box.style.color=error?'#842029':'#17375e';
+ }
+ async function geography(url,targetId){
+  if(requests.has(url))return requests.get(url);
+  const work=(async()=>{
+   const target=document.getElementById(targetId);
+   if(!pending++){
+    saved=[...document.querySelectorAll('select, button[type="submit"], form button:not([type])')].map(el=>[el,el.disabled]);
+    saved.forEach(([el])=>{el.disabled=true;});
+   }
+   if(target){target.replaceChildren(new Option('Loading…',''));target.setAttribute('aria-busy','true');}
+   status(url.includes('/wards/')?'Loading wards…':'Loading constituencies…');
+   const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),20000);
+   let failed=false;
+   try{
+    const response=await fetch(url,{signal:controller.signal});
+    if(!response.ok)throw new Error('Geography request failed');
+    const rows=await response.json();
+    if(!Array.isArray(rows)||rows.some(x=>!Number.isInteger(x.id)||typeof x.name!=='string'))throw new Error('Invalid geography response');
+    return rows.map(x=>({...x,name:x.name.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}));
+   }catch(error){failed=true;status('Unable to load areas. Please select the county or constituency again to retry.',true);return [];}
+   finally{
+    clearTimeout(timer);if(target)target.removeAttribute('aria-busy');
+    if(!--pending){saved.forEach(([el,disabled])=>{el.disabled=disabled;});saved=[];if(!failed)status('');}
+   }
+  })();
+  requests.set(url,work);
+  try{return await work;}finally{requests.delete(url);}
+ }
+ function submit(form,event){
+  if(event.defaultPrevented)return;
+  if(pending||form.dataset.rc10Submitting==='true'){event.preventDefault();return;}
+  form.dataset.rc10Submitting='true';form.setAttribute('aria-busy','true');
+  // Keep successful named controls enabled so their values reach Flask.
+  form.querySelectorAll('button, input[type="submit"]').forEach(el=>{if(el.disabled)return;el.dataset.rc10Locked='true';el.setAttribute('aria-disabled','true');el.style.pointerEvents='none';});
+  status(form.querySelector('[name="action"][value="select"]')?'Loading selected election…':'Processing… Please wait.');
+ }
+ document.addEventListener('submit',event=>submit(event.target,event));
+ document.addEventListener('click',event=>{if(event.target.closest('[data-rc10-locked]')){event.preventDefault();event.stopImmediatePropagation();}},true);
+ window.addEventListener('pageshow',()=>{
+  navigation=false;document.querySelectorAll('[data-rc10-submitting]').forEach(form=>{delete form.dataset.rc10Submitting;form.removeAttribute('aria-busy');});
+  document.querySelectorAll('[data-rc10-locked]').forEach(el=>{delete el.dataset.rc10Locked;el.removeAttribute('aria-disabled');el.style.pointerEvents='';});status('');
+ });
+ function election(select){
+  if(navigation)return;navigation=true;
+  // requestSubmit triggers the shared guard and preserves election_id.
+  select.form.requestSubmit();
+  if(select.form.dataset.rc10Submitting==='true'){select.style.pointerEvents='none';select.dataset.rc10Locked='true';select.setAttribute('aria-disabled','true');status('Loading selected election…');}else navigation=false;
+ }
+ return {geography,election};
+})();
+</script>
   <title>{% block title %}Kenya Secure E-Voting{% endblock %}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
@@ -1068,13 +1131,13 @@ const county=document.getElementById('countySelect'), constituency=document.getE
 async function loadConstituencies(selected=''){
   constituency.innerHTML='<option value="">Loading...</option>'; constituency.disabled=true; ward.innerHTML='<option value="">Select constituency first</option>'; ward.disabled=true;
   if(!county.value){ constituency.innerHTML='<option value="">Select county first</option>'; return; }
-  const rows=await fetch('/api/constituencies/'+county.value).then(r=>r.json());
+  const rows=await rc10.geography('/api/constituencies/'+county.value,'constituencySelect');
   constituency.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}" ${String(x.id)===String(selected)?'selected':''}>${x.name}</option>`).join(''); constituency.disabled=false;
 }
 async function loadWards(selected=''){
   ward.innerHTML='<option value="">Loading...</option>'; ward.disabled=true;
   if(!constituency.value){ ward.innerHTML='<option value="">Select constituency first</option>'; return; }
-  const rows=await fetch('/api/wards/'+constituency.value).then(r=>r.json());
+  const rows=await rc10.geography('/api/wards/'+constituency.value,'wardSelect');
   ward.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}" ${String(x.id)===String(selected)?'selected':''}>${x.name}</option>`).join(''); ward.disabled=false;
 }
 county.addEventListener('change',()=>loadConstituencies()); constituency.addEventListener('change',()=>loadWards());
@@ -1384,6 +1447,12 @@ ADMIN_HTML = """
       <div class="card-body p-4">
         <h3>Administrator Dashboard</h3>
         <p class="text-muted">Election lifecycle and security controls.</p>
+        <div class="border-start border-4 border-primary rounded bg-light p-3 mb-4" style="overflow-wrap:anywhere">
+          <div class="small text-uppercase text-muted fw-bold">Current Election</div>
+          <h4 class="mt-1 mb-2">{{ election.title }}</h4>
+          <span class="badge text-bg-primary">{{ 'General Election' if election.election_type == 'general' else 'By-Election' }}</span>
+          {% if election.election_date %}<span class="ms-2 text-muted">{{ election.election_date.strftime('%d %B %Y') }}</span>{% endif %}
+        </div>
         <div class="d-flex gap-2 flex-wrap mb-3">
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_candidates') }}">Manage Candidates</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_regions') }}">Manage Counties</a>
@@ -1395,8 +1464,8 @@ ADMIN_HTML = """
         <form method="POST">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="mb-3">
-            <label class="form-label">Election title</label>
-            <input class="form-control" name="title" value="{{ election.title }}" maxlength="200" required>
+            <label class="form-label fw-bold" for="adminElectionTitle">Current election title</label>
+            <input id="adminElectionTitle" class="form-control form-control-lg" name="title" value="{{ election.title }}" maxlength="200" required>
           </div>
           <div class="form-check form-switch mb-3">
             <input class="form-check-input" type="checkbox" name="is_open" id="is_open" {% if election.is_open %}checked{% endif %}>
@@ -1610,11 +1679,11 @@ GEOGRAPHY_V3 = r"""{% extends 'base.html' %}{% block content %}
  <div class="col-md-6"><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="kind" value="ward"><h5>Add Ward</h5><select id="adminCounty" class="form-select mb-2"><option value="">Select county first</option>{% for c in counties %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select><select id="adminCon" class="form-select mb-2" name="constituency_id" required disabled><option value="">Select county first</option></select><input class="form-control mb-2" name="name" required placeholder="Ward"><button class="btn btn-outline-primary">Add Ward</button></form></div>
 </div></details>
 <script>
-async function getJSON(url){const r=await fetch(url); if(!r.ok) throw new Error('Unable to load geography'); return r.json();}
+async function getJSON(url,targetId){return rc10.geography(url,targetId);}
 const gc=document.getElementById('geoCounty'), gx=document.getElementById('geoCon'), gw=document.getElementById('geoWard'), gs=document.getElementById('geoStatus');
-gc.addEventListener('change', async()=>{gx.disabled=true; gw.disabled=true; gw.innerHTML='<option value="">Select constituency first</option>'; if(!gc.value){gx.innerHTML='<option value="">Select county first</option>';gs.textContent='Choose a county to browse its constituencies.';return;} const rows=await getJSON('/api/constituencies/'+gc.value); gx.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join(''); gx.disabled=false; gs.textContent=rows.length+' constituencies loaded for the selected county.';});
-gx.addEventListener('change', async()=>{gw.disabled=true;if(!gx.value){gw.innerHTML='<option value="">Select constituency first</option>';return;}const rows=await getJSON('/api/wards/'+gx.value);gw.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');gw.disabled=false;gs.textContent=rows.length+' wards loaded for the selected constituency.';});
-const ac=document.getElementById('adminCounty'), ax=document.getElementById('adminCon'); ac.addEventListener('change',async()=>{ax.disabled=true;if(!ac.value){ax.innerHTML='<option value="">Select county first</option>';return;}const rows=await getJSON('/api/constituencies/'+ac.value);ax.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ax.disabled=false;});
+gc.addEventListener('change', async()=>{gx.disabled=true; gw.disabled=true; gw.innerHTML='<option value="">Select constituency first</option>'; if(!gc.value){gx.innerHTML='<option value="">Select county first</option>';gs.textContent='Choose a county to browse its constituencies.';return;} const rows=await getJSON('/api/constituencies/'+gc.value,'geoCon'); gx.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join(''); gx.disabled=false; gs.textContent=rows.length+' constituencies loaded for the selected county.';});
+gx.addEventListener('change', async()=>{gw.disabled=true;if(!gx.value){gw.innerHTML='<option value="">Select constituency first</option>';return;}const rows=await getJSON('/api/wards/'+gx.value,'geoWard');gw.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');gw.disabled=false;gs.textContent=rows.length+' wards loaded for the selected constituency.';});
+const ac=document.getElementById('adminCounty'), ax=document.getElementById('adminCon'); ac.addEventListener('change',async()=>{ax.disabled=true;if(!ac.value){ax.innerHTML='<option value="">Select county first</option>';return;}const rows=await getJSON('/api/constituencies/'+ac.value,'adminCon');ax.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ax.disabled=false;});
 </script>{% endblock %}"""
 
 CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}
@@ -1622,7 +1691,7 @@ CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}
 .contest-stat{font-size:1.55rem;font-weight:700;color:#17375e}.filter-label{font-weight:600;color:#294866}.contest-table td,.contest-table th{vertical-align:middle}.readiness-row{display:flex;justify-content:space-between;gap:1rem;padding:.45rem 0;border-bottom:1px solid #edf0f3}.readiness-row:last-child{border-bottom:0}.scope-card{border-left:4px solid #0d6efd}.protected-note{background:#eef7ff;border:1px solid #cfe7fb;color:#315a78;border-radius:.5rem;padding:.7rem .85rem}
 </style>
 <div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3"><div><h2 class="mb-1">Election Contests</h2><p class="text-muted mb-0">Browse and verify contests for the current election without scrolling through the full national list.</p></div><a class="btn btn-outline-secondary" href="{{url_for('manage_elections')}}">Election Management</a></div>
-<form method="get" action="{{url_for('manage_contests')}}" class="card card-body mb-3"><label for="viewElection" class="filter-label form-label">View election contests (read-only selection)</label><select id="viewElection" name="election_id" class="form-select" onchange="this.form.submit()">{% for item in all_elections %}<option value="{{item.id}}" {% if item.id==election.id %}selected{% endif %}>{{item.title}} — {{'CURRENT' if item.is_current else 'HISTORICAL'}}</option>{% endfor %}</select><div class="form-text">Selecting an election changes only this page's view; it does not change the current election.</div></form>
+<form method="get" action="{{url_for('manage_contests')}}" class="card card-body mb-3"><label for="viewElection" class="filter-label form-label">View election contests (read-only selection)</label><select id="viewElection" name="election_id" class="form-select" onchange="rc10.election(this)">{% for item in all_elections %}<option value="{{item.id}}" {% if item.id==election.id %}selected{% endif %}>{{item.title}} — {{'CURRENT' if item.is_current else 'HISTORICAL'}}</option>{% endfor %}</select><div class="form-text">Selecting an election changes only this page's view; it does not change the current election.</div></form>
 <div class="card card-body mb-4 scope-card"><div class="row g-3 align-items-center"><div class="col-lg-7"><h4 class="mb-1">{{election.title}}</h4><div class="text-muted">{{'General Election' if election.election_type=='general' else 'By-Election'}}{% if election.election_date %} · {{election.election_date.strftime('%d %B %Y')}}{% endif %}</div></div><div class="col-lg-5 text-lg-end"><span class="badge text-bg-primary">{{total_contests}} CONTESTS</span> <span class="badge {{'text-bg-success' if election.is_open else 'text-bg-secondary'}}">VOTING {{'OPEN' if election.is_open else 'CLOSED'}}</span> <span class="badge {{'text-bg-success' if election.results_visible else 'text-bg-secondary'}}">RESULTS {{'RELEASED' if election.results_visible else 'NOT RELEASED'}}</span></div></div></div>
 <div class="row g-3 mb-4">
 {% for item in summary %}<div class="col-md-4 col-xl-2"><div class="card card-body h-100"><div class="contest-stat">{{item.count}}</div><div>{{item.label}}</div></div></div>{% endfor %}
@@ -1637,8 +1706,8 @@ const fp=document.getElementById('filterPosition'),fc=document.getElementById('f
 const fcw=document.getElementById('filterCountyWrap'),fxw=document.getElementById('filterConWrap'),fww=document.getElementById('filterWardWrap');
 function filterMode(){const p=fp.value,n=p==='President',countyOnly=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament',mca=p==='Member of County Assembly';fcw.style.display=(p&&n)?'none':'';fxw.style.display=(p&&(n||countyOnly))?'none':'';fww.style.display=(p&&(n||countyOnly||mp))?'none':'';if(n){fc.value='';fx.value='';fw.value='';fx.disabled=true;fw.disabled=true;}else if(countyOnly){fx.value='';fw.value='';fx.disabled=true;fw.disabled=true;}else if(mp){fw.value='';fw.disabled=true;}filterRows();}
 function filterRows(){let n=0;document.querySelectorAll('#contestTable tbody tr').forEach(r=>{let ok=(!fp.value||r.dataset.position===fp.value)&&(!fc.value||r.dataset.county===fc.value)&&(!fx.value||r.dataset.con===fx.value)&&(!fw.value||r.dataset.ward===fw.value)&&(!q.value||r.innerText.toLowerCase().includes(q.value.toLowerCase()));r.style.display=ok?'':'none';if(ok)n++;});document.getElementById('visibleCount').textContent=n+' contest(s) shown.';}
-fp.addEventListener('change',filterMode);q.addEventListener('input',filterRows);fc.addEventListener('change',async()=>{fx.disabled=true;fw.disabled=true;fx.innerHTML='<option value="">All constituencies</option>';fw.innerHTML='<option value="">All wards</option>';if(fc.value){const rows=await fetch('/api/constituencies/'+fc.value).then(r=>r.json());fx.innerHTML='<option value="">All constituencies</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fx.disabled=false;}filterRows();});fx.addEventListener('change',async()=>{fw.disabled=true;fw.innerHTML='<option value="">All wards</option>';if(fx.value){const rows=await fetch('/api/wards/'+fx.value).then(r=>r.json());fw.innerHTML='<option value="">All wards</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fw.disabled=false;}filterRows();});fw.addEventListener('change',filterRows);filterMode();
-{% if election.election_type!='general' and election.id==current_election.id %}const pos=document.getElementById('position'),cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),county=document.getElementById('contestCounty'),con=document.getElementById('contestConstituency'),ward=document.getElementById('contestWard');function mode(){const p=pos.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';cw.style.display=(!p||n)?'none':'';xw.style.display=(!p||n||co)?'none':'';ww.style.display=(!p||n||co||mp)?'none':'';}pos.addEventListener('change',mode);mode();county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;ward.innerHTML='<option value="">Select constituency first</option>';if(!county.value)return;const rows=await fetch('/api/constituencies/'+county.value).then(r=>r.json());con.innerHTML='<option value="">Select constituency...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');con.disabled=false;});con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value)return;const rows=await fetch('/api/wards/'+con.value).then(r=>r.json());ward.innerHTML='<option value="">Select ward...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=false;});{% endif %}
+fp.addEventListener('change',filterMode);q.addEventListener('input',filterRows);fc.addEventListener('change',async()=>{fx.disabled=true;fw.disabled=true;fx.innerHTML='<option value="">All constituencies</option>';fw.innerHTML='<option value="">All wards</option>';if(fc.value){const rows=await rc10.geography('/api/constituencies/'+fc.value,'filterCon');fx.innerHTML='<option value="">All constituencies</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fx.disabled=false;}filterRows();});fx.addEventListener('change',async()=>{fw.disabled=true;fw.innerHTML='<option value="">All wards</option>';if(fx.value){const rows=await rc10.geography('/api/wards/'+fx.value,'filterWard');fw.innerHTML='<option value="">All wards</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fw.disabled=false;}filterRows();});fw.addEventListener('change',filterRows);filterMode();
+{% if election.election_type!='general' and election.id==current_election.id %}const pos=document.getElementById('position'),cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),county=document.getElementById('contestCounty'),con=document.getElementById('contestConstituency'),ward=document.getElementById('contestWard');function mode(){const p=pos.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';cw.style.display=(!p||n)?'none':'';xw.style.display=(!p||n||co)?'none':'';ww.style.display=(!p||n||co||mp)?'none':'';}pos.addEventListener('change',mode);mode();county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;ward.innerHTML='<option value="">Select constituency first</option>';if(!county.value)return;const rows=await rc10.geography('/api/constituencies/'+county.value,'contestConstituency');con.innerHTML='<option value="">Select constituency...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');con.disabled=false;});con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value)return;const rows=await rc10.geography('/api/wards/'+con.value,'contestWard');ward.innerHTML='<option value="">Select ward...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=false;});{% endif %}
 </script>{% endblock %}"""
 
 ELECTIONS_RC7 = """{% extends 'base.html' %}{% block content %}
@@ -1654,8 +1723,8 @@ ELECTIONS_RC7 = """{% extends 'base.html' %}{% block content %}
 const et=document.getElementById('etype'), bf=document.getElementById('byFields'), bp=document.getElementById('byPos'), bc=document.getElementById('byCounty'), bx=document.getElementById('byCon'), bw=document.getElementById('byWard'), bcw=document.getElementById('byCountyWrap'), bxw=document.getElementById('byConWrap'), bww=document.getElementById('byWardWrap');
 function typeMode(){bf.style.display=et.value==='by_election'?'':'none'}; et.addEventListener('change',typeMode);typeMode();
 function posMode(){const p=bp.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';bcw.style.display=n?'none':'';bxw.style.display=(n||co)?'none':'';bww.style.display=(n||co||mp)?'none':'';}bp.addEventListener('change',posMode);posMode();
-bc.addEventListener('change',async()=>{bx.disabled=true;bw.disabled=true;bw.innerHTML='<option value="">Select constituency first</option>';if(!bc.value)return;const r=await fetch('/api/constituencies/'+bc.value).then(x=>x.json());bx.innerHTML='<option value="">Select constituency</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bx.disabled=false});
-bx.addEventListener('change',async()=>{bw.disabled=true;if(!bx.value)return;const r=await fetch('/api/wards/'+bx.value).then(x=>x.json());bw.innerHTML='<option value="">Select ward</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bw.disabled=false});
+bc.addEventListener('change',async()=>{bx.disabled=true;bw.disabled=true;bw.innerHTML='<option value="">Select constituency first</option>';if(!bc.value)return;const r=await rc10.geography('/api/constituencies/'+bc.value,'byCon');bx.innerHTML='<option value="">Select constituency</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bx.disabled=false});
+bx.addEventListener('change',async()=>{bw.disabled=true;if(!bx.value)return;const r=await rc10.geography('/api/wards/'+bx.value,'byWard');bw.innerHTML='<option value="">Select ward</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bw.disabled=false});
 </script>{% endblock %}"""
 
 AUDIT_LOG_HTML = """
