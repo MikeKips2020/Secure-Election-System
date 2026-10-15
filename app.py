@@ -901,7 +901,17 @@ BASE_HTML = """
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-<!-- RC10: shared selection feedback and duplicate-submit protection. -->
+<!-- RC10: visible selection feedback and duplicate-submit protection. -->
+<style>
+@keyframes rc10-spin { to { transform:rotate(360deg); } }
+.rc10-spinner { display:inline-block;width:1.15rem;height:1.15rem;border:3px solid #cad8e7;border-top-color:#17375e;border-radius:50%;animation:rc10-spin .7s linear infinite;vertical-align:middle;margin-right:.6rem; }
+.rc10-feedback { padding:.7rem .9rem;margin-top:.5rem;border:1px solid #cbd9e7;border-radius:.5rem;background:#eef5fc;color:#17375e;font-weight:600; }
+.rc10-feedback[hidden] { display:none!important; }
+.rc10-feedback.rc10-error { color:#842029;background:#f8d7da;border-color:#f1aeb5; }
+.admin-election-title { color:#12233d!important;font-weight:800!important;font-size:clamp(1.8rem,3vw,2.5rem)!important;line-height:1.2;overflow-wrap:anywhere; }
+#adminElectionTitle { color:#12233d;font-weight:700;font-size:1.3rem; }
+[data-rc10-locked] { cursor:wait;opacity:.75; }
+</style>
 <script>
 window.rc10 = (() => {
  let pending=0, saved=[], navigation=false;
@@ -910,8 +920,16 @@ window.rc10 = (() => {
   let box=document.getElementById('rc10Status');
   if(!box){box=document.createElement('div');box.id='rc10Status';box.setAttribute('role','status');box.setAttribute('aria-live','polite');box.style.cssText='position:fixed;bottom:1rem;right:1rem;z-index:2000;max-width:90vw;padding:1rem;background:white;border:1px solid #cbd9e7;border-radius:.6rem;box-shadow:0 4px 18px #0002';document.body.appendChild(box);}
   box.replaceChildren();box.hidden=!message;
-  if(message&&!error){const spinner=document.createElement('span');spinner.className='spinner-border spinner-border-sm me-2';spinner.setAttribute('aria-hidden','true');box.appendChild(spinner);}
+  if(message&&!error){const spinner=document.createElement('span');spinner.className='rc10-spinner';spinner.setAttribute('aria-hidden','true');box.appendChild(spinner);}
   box.appendChild(document.createTextNode(message));box.style.color=error?'#842029':'#17375e';
+ }
+ function feedback(target,message,error=false){
+  if(!target)return;
+  let box=document.getElementById(target.id+'Loading');
+  if(!box){box=document.createElement('div');box.id=target.id+'Loading';box.setAttribute('role','status');box.setAttribute('aria-live','polite');target.insertAdjacentElement('afterend',box);}
+  box.className='rc10-feedback'+(error?' rc10-error':'');box.hidden=!message;box.replaceChildren();
+  if(message&&!error){const spinner=document.createElement('span');spinner.className='rc10-spinner';spinner.setAttribute('aria-hidden','true');box.appendChild(spinner);}
+  box.appendChild(document.createTextNode(message));
  }
  async function geography(url,targetId){
   if(requests.has(url))return requests.get(url);
@@ -922,7 +940,8 @@ window.rc10 = (() => {
     saved.forEach(([el])=>{el.disabled=true;});
    }
    if(target){target.replaceChildren(new Option('Loading…',''));target.setAttribute('aria-busy','true');}
-   status(url.includes('/wards/')?'Loading wards…':'Loading constituencies…');
+   const message=url.includes('/wards/')?'Loading wards for the selected constituency, please wait…':'Loading constituencies for the selected county, please wait…';
+   feedback(target,message);status(message);
    const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),20000);
    let failed=false;
    try{
@@ -930,8 +949,13 @@ window.rc10 = (() => {
     if(!response.ok)throw new Error('Geography request failed');
     const rows=await response.json();
     if(!Array.isArray(rows)||rows.some(x=>!Number.isInteger(x.id)||typeof x.name!=='string'))throw new Error('Invalid geography response');
+    feedback(target,rows.length?'':(url.includes('/wards/')?'No wards found for this constituency.':'No constituencies found for this county.'),!rows.length);
     return rows.map(x=>({...x,name:x.name.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}));
-   }catch(error){failed=true;status('Unable to load areas. Please select the county or constituency again to retry.',true);return [];}
+   }catch(error){
+    failed=true;
+    const message=(error.name==='AbortError'?'The geography request timed out. ':'Unable to load geographical data. ')+(url.includes('/wards/')?'Select the constituency again to retry.':'Select the county again to retry.');
+    feedback(target,message,true);status(message,true);return [];
+   }
    finally{
     clearTimeout(timer);if(target)target.removeAttribute('aria-busy');
     if(!--pending){saved.forEach(([el,disabled])=>{el.disabled=disabled;});saved=[];if(!failed)status('');}
@@ -946,19 +970,31 @@ window.rc10 = (() => {
   form.dataset.rc10Submitting='true';form.setAttribute('aria-busy','true');
   // Keep successful named controls enabled so their values reach Flask.
   form.querySelectorAll('button, input[type="submit"]').forEach(el=>{if(el.disabled)return;el.dataset.rc10Locked='true';el.setAttribute('aria-disabled','true');el.style.pointerEvents='none';});
-  status(form.querySelector('[name="action"][value="select"]')?'Loading selected election…':'Processing… Please wait.');
+  status(form.querySelector('#viewElection, [name="action"][value="select"]')?'Loading election contests, please wait…':'Processing… Please wait.');
  }
  document.addEventListener('submit',event=>submit(event.target,event));
- document.addEventListener('click',event=>{if(event.target.closest('[data-rc10-locked]')){event.preventDefault();event.stopImmediatePropagation();}},true);
+ function blockLocked(event){if(event.target.closest('[data-rc10-locked]')){event.preventDefault();event.stopImmediatePropagation();}}
+ document.addEventListener('click',blockLocked,true);
+ document.addEventListener('keydown',blockLocked,true);
+ document.addEventListener('change',event=>{if(navigation&&event.target.id==='viewElection'){event.target.value=event.target.dataset.rc10Value;event.stopImmediatePropagation();}},true);
  window.addEventListener('pageshow',()=>{
   navigation=false;document.querySelectorAll('[data-rc10-submitting]').forEach(form=>{delete form.dataset.rc10Submitting;form.removeAttribute('aria-busy');});
-  document.querySelectorAll('[data-rc10-locked]').forEach(el=>{delete el.dataset.rc10Locked;el.removeAttribute('aria-disabled');el.style.pointerEvents='';});status('');
+  document.querySelectorAll('[data-rc10-locked]').forEach(el=>{delete el.dataset.rc10Locked;el.removeAttribute('aria-disabled');el.removeAttribute('aria-busy');el.style.pointerEvents='';});document.querySelectorAll('[data-rc10-election-feedback]').forEach(box=>{box.hidden=true;});if(!pending)status('');
  });
  function election(select){
-  if(navigation)return;navigation=true;
-  // requestSubmit triggers the shared guard and preserves election_id.
-  select.form.requestSubmit();
-  if(select.form.dataset.rc10Submitting==='true'){select.style.pointerEvents='none';select.dataset.rc10Locked='true';select.setAttribute('aria-disabled','true');status('Loading selected election…');}else navigation=false;
+  if(navigation||pending)return;
+  navigation=true;select.dataset.rc10Value=select.value;
+  select.style.pointerEvents='none';select.dataset.rc10Locked='true';select.setAttribute('aria-disabled','true');select.setAttribute('aria-busy','true');
+  feedback(select,'Loading election contests, please wait…');
+  document.getElementById(select.id+'Loading').dataset.rc10ElectionFeedback='true';
+  status('Loading election contests, please wait…');
+  // Allow the spinner and message to paint before starting full-page navigation.
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+   select.form.requestSubmit();
+   if(select.form.dataset.rc10Submitting!=='true'){
+    navigation=false;delete select.dataset.rc10Locked;select.style.pointerEvents='';select.removeAttribute('aria-disabled');select.removeAttribute('aria-busy');feedback(select,'');status('');
+   }
+  }));
  }
  return {geography,election};
 })();
@@ -1132,13 +1168,13 @@ async function loadConstituencies(selected=''){
   constituency.innerHTML='<option value="">Loading...</option>'; constituency.disabled=true; ward.innerHTML='<option value="">Select constituency first</option>'; ward.disabled=true;
   if(!county.value){ constituency.innerHTML='<option value="">Select county first</option>'; return; }
   const rows=await rc10.geography('/api/constituencies/'+county.value,'constituencySelect');
-  constituency.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}" ${String(x.id)===String(selected)?'selected':''}>${x.name}</option>`).join(''); constituency.disabled=false;
+  constituency.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}" ${String(x.id)===String(selected)?'selected':''}>${x.name}</option>`).join(''); constituency.disabled=rows.length===0;
 }
 async function loadWards(selected=''){
   ward.innerHTML='<option value="">Loading...</option>'; ward.disabled=true;
   if(!constituency.value){ ward.innerHTML='<option value="">Select constituency first</option>'; return; }
   const rows=await rc10.geography('/api/wards/'+constituency.value,'wardSelect');
-  ward.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}" ${String(x.id)===String(selected)?'selected':''}>${x.name}</option>`).join(''); ward.disabled=false;
+  ward.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}" ${String(x.id)===String(selected)?'selected':''}>${x.name}</option>`).join(''); ward.disabled=rows.length===0;
 }
 county.addEventListener('change',()=>loadConstituencies()); constituency.addEventListener('change',()=>loadWards());
 {% if selected_region %}loadConstituencies('{{ selected_constituency or "" }}').then(()=>{% if selected_constituency %}loadWards('{{ selected_ward or "" }}'){% else %}null{% endif %});{% endif %}
@@ -1449,7 +1485,7 @@ ADMIN_HTML = """
         <p class="text-muted">Election lifecycle and security controls.</p>
         <div class="border-start border-4 border-primary rounded bg-light p-3 mb-4" style="overflow-wrap:anywhere">
           <div class="small text-uppercase text-muted fw-bold">Current Election</div>
-          <h4 class="mt-1 mb-2">{{ election.title }}</h4>
+          <h2 class="admin-election-title mt-1 mb-2">{{ election.title }}</h2>
           <span class="badge text-bg-primary">{{ 'General Election' if election.election_type == 'general' else 'By-Election' }}</span>
           {% if election.election_date %}<span class="ms-2 text-muted">{{ election.election_date.strftime('%d %B %Y') }}</span>{% endif %}
         </div>
@@ -1681,9 +1717,9 @@ GEOGRAPHY_V3 = r"""{% extends 'base.html' %}{% block content %}
 <script>
 async function getJSON(url,targetId){return rc10.geography(url,targetId);}
 const gc=document.getElementById('geoCounty'), gx=document.getElementById('geoCon'), gw=document.getElementById('geoWard'), gs=document.getElementById('geoStatus');
-gc.addEventListener('change', async()=>{gx.disabled=true; gw.disabled=true; gw.innerHTML='<option value="">Select constituency first</option>'; if(!gc.value){gx.innerHTML='<option value="">Select county first</option>';gs.textContent='Choose a county to browse its constituencies.';return;} const rows=await getJSON('/api/constituencies/'+gc.value,'geoCon'); gx.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join(''); gx.disabled=false; gs.textContent=rows.length+' constituencies loaded for the selected county.';});
-gx.addEventListener('change', async()=>{gw.disabled=true;if(!gx.value){gw.innerHTML='<option value="">Select constituency first</option>';return;}const rows=await getJSON('/api/wards/'+gx.value,'geoWard');gw.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');gw.disabled=false;gs.textContent=rows.length+' wards loaded for the selected constituency.';});
-const ac=document.getElementById('adminCounty'), ax=document.getElementById('adminCon'); ac.addEventListener('change',async()=>{ax.disabled=true;if(!ac.value){ax.innerHTML='<option value="">Select county first</option>';return;}const rows=await getJSON('/api/constituencies/'+ac.value,'adminCon');ax.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ax.disabled=false;});
+gc.addEventListener('change', async()=>{gx.disabled=true; gw.disabled=true; gw.innerHTML='<option value="">Select constituency first</option>'; if(!gc.value){gx.innerHTML='<option value="">Select county first</option>';gs.textContent='Choose a county to browse its constituencies.';return;} const rows=await getJSON('/api/constituencies/'+gc.value,'geoCon'); gx.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join(''); gx.disabled=rows.length===0; gs.textContent=rows.length+' constituencies loaded for the selected county.';});
+gx.addEventListener('change', async()=>{gw.disabled=true;if(!gx.value){gw.innerHTML='<option value="">Select constituency first</option>';return;}const rows=await getJSON('/api/wards/'+gx.value,'geoWard');gw.innerHTML='<option value="">Select ward</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');gw.disabled=rows.length===0;gs.textContent=rows.length+' wards loaded for the selected constituency.';});
+const ac=document.getElementById('adminCounty'), ax=document.getElementById('adminCon'); ac.addEventListener('change',async()=>{ax.disabled=true;if(!ac.value){ax.innerHTML='<option value="">Select county first</option>';return;}const rows=await getJSON('/api/constituencies/'+ac.value,'adminCon');ax.innerHTML='<option value="">Select constituency</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ax.disabled=rows.length===0;});
 </script>{% endblock %}"""
 
 CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}
@@ -1706,8 +1742,8 @@ const fp=document.getElementById('filterPosition'),fc=document.getElementById('f
 const fcw=document.getElementById('filterCountyWrap'),fxw=document.getElementById('filterConWrap'),fww=document.getElementById('filterWardWrap');
 function filterMode(){const p=fp.value,n=p==='President',countyOnly=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament',mca=p==='Member of County Assembly';fcw.style.display=(p&&n)?'none':'';fxw.style.display=(p&&(n||countyOnly))?'none':'';fww.style.display=(p&&(n||countyOnly||mp))?'none':'';if(n){fc.value='';fx.value='';fw.value='';fx.disabled=true;fw.disabled=true;}else if(countyOnly){fx.value='';fw.value='';fx.disabled=true;fw.disabled=true;}else if(mp){fw.value='';fw.disabled=true;}filterRows();}
 function filterRows(){let n=0;document.querySelectorAll('#contestTable tbody tr').forEach(r=>{let ok=(!fp.value||r.dataset.position===fp.value)&&(!fc.value||r.dataset.county===fc.value)&&(!fx.value||r.dataset.con===fx.value)&&(!fw.value||r.dataset.ward===fw.value)&&(!q.value||r.innerText.toLowerCase().includes(q.value.toLowerCase()));r.style.display=ok?'':'none';if(ok)n++;});document.getElementById('visibleCount').textContent=n+' contest(s) shown.';}
-fp.addEventListener('change',filterMode);q.addEventListener('input',filterRows);fc.addEventListener('change',async()=>{fx.disabled=true;fw.disabled=true;fx.innerHTML='<option value="">All constituencies</option>';fw.innerHTML='<option value="">All wards</option>';if(fc.value){const rows=await rc10.geography('/api/constituencies/'+fc.value,'filterCon');fx.innerHTML='<option value="">All constituencies</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fx.disabled=false;}filterRows();});fx.addEventListener('change',async()=>{fw.disabled=true;fw.innerHTML='<option value="">All wards</option>';if(fx.value){const rows=await rc10.geography('/api/wards/'+fx.value,'filterWard');fw.innerHTML='<option value="">All wards</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fw.disabled=false;}filterRows();});fw.addEventListener('change',filterRows);filterMode();
-{% if election.election_type!='general' and election.id==current_election.id %}const pos=document.getElementById('position'),cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),county=document.getElementById('contestCounty'),con=document.getElementById('contestConstituency'),ward=document.getElementById('contestWard');function mode(){const p=pos.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';cw.style.display=(!p||n)?'none':'';xw.style.display=(!p||n||co)?'none':'';ww.style.display=(!p||n||co||mp)?'none':'';}pos.addEventListener('change',mode);mode();county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;ward.innerHTML='<option value="">Select constituency first</option>';if(!county.value)return;const rows=await rc10.geography('/api/constituencies/'+county.value,'contestConstituency');con.innerHTML='<option value="">Select constituency...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');con.disabled=false;});con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value)return;const rows=await rc10.geography('/api/wards/'+con.value,'contestWard');ward.innerHTML='<option value="">Select ward...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=false;});{% endif %}
+fp.addEventListener('change',filterMode);q.addEventListener('input',filterRows);fc.addEventListener('change',async()=>{fx.disabled=true;fw.disabled=true;fx.innerHTML='<option value="">All constituencies</option>';fw.innerHTML='<option value="">All wards</option>';if(fc.value){const rows=await rc10.geography('/api/constituencies/'+fc.value,'filterCon');fx.innerHTML='<option value="">All constituencies</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fx.disabled=rows.length===0;}filterRows();});fx.addEventListener('change',async()=>{fw.disabled=true;fw.innerHTML='<option value="">All wards</option>';if(fx.value){const rows=await rc10.geography('/api/wards/'+fx.value,'filterWard');fw.innerHTML='<option value="">All wards</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fw.disabled=rows.length===0;}filterRows();});fw.addEventListener('change',filterRows);filterMode();
+{% if election.election_type!='general' and election.id==current_election.id %}const pos=document.getElementById('position'),cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),county=document.getElementById('contestCounty'),con=document.getElementById('contestConstituency'),ward=document.getElementById('contestWard');function mode(){const p=pos.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';cw.style.display=(!p||n)?'none':'';xw.style.display=(!p||n||co)?'none':'';ww.style.display=(!p||n||co||mp)?'none':'';}pos.addEventListener('change',mode);mode();county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;ward.innerHTML='<option value="">Select constituency first</option>';if(!county.value)return;const rows=await rc10.geography('/api/constituencies/'+county.value,'contestConstituency');con.innerHTML='<option value="">Select constituency...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');con.disabled=rows.length===0;});con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value)return;const rows=await rc10.geography('/api/wards/'+con.value,'contestWard');ward.innerHTML='<option value="">Select ward...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=rows.length===0;});{% endif %}
 </script>{% endblock %}"""
 
 ELECTIONS_RC7 = """{% extends 'base.html' %}{% block content %}
@@ -1723,8 +1759,8 @@ ELECTIONS_RC7 = """{% extends 'base.html' %}{% block content %}
 const et=document.getElementById('etype'), bf=document.getElementById('byFields'), bp=document.getElementById('byPos'), bc=document.getElementById('byCounty'), bx=document.getElementById('byCon'), bw=document.getElementById('byWard'), bcw=document.getElementById('byCountyWrap'), bxw=document.getElementById('byConWrap'), bww=document.getElementById('byWardWrap');
 function typeMode(){bf.style.display=et.value==='by_election'?'':'none'}; et.addEventListener('change',typeMode);typeMode();
 function posMode(){const p=bp.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';bcw.style.display=n?'none':'';bxw.style.display=(n||co)?'none':'';bww.style.display=(n||co||mp)?'none':'';}bp.addEventListener('change',posMode);posMode();
-bc.addEventListener('change',async()=>{bx.disabled=true;bw.disabled=true;bw.innerHTML='<option value="">Select constituency first</option>';if(!bc.value)return;const r=await rc10.geography('/api/constituencies/'+bc.value,'byCon');bx.innerHTML='<option value="">Select constituency</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bx.disabled=false});
-bx.addEventListener('change',async()=>{bw.disabled=true;if(!bx.value)return;const r=await rc10.geography('/api/wards/'+bx.value,'byWard');bw.innerHTML='<option value="">Select ward</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bw.disabled=false});
+bc.addEventListener('change',async()=>{bx.disabled=true;bw.disabled=true;bw.innerHTML='<option value="">Select constituency first</option>';if(!bc.value)return;const r=await rc10.geography('/api/constituencies/'+bc.value,'byCon');bx.innerHTML='<option value="">Select constituency</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bx.disabled=r.length===0});
+bx.addEventListener('change',async()=>{bw.disabled=true;if(!bx.value)return;const r=await rc10.geography('/api/wards/'+bx.value,'byWard');bw.innerHTML='<option value="">Select ward</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bw.disabled=r.length===0});
 </script>{% endblock %}"""
 
 AUDIT_LOG_HTML = """
