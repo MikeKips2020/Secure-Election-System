@@ -2347,6 +2347,19 @@ def manage_candidates():
     if request.method == "POST":
         validate_csrf()
         action = request.form.get("action")
+          # RC11: Prevent candidate changes while voting is open.
+    if election.is_open and action in {"add", "edit", "toggle"}:
+        log_event(
+            "CANDIDATE_CHANGE_BLOCKED",
+            "WARNING",
+            user.id,
+            f"Candidate modification blocked: election={election.id}, action={action}"
+        )
+        flash(
+            "Candidate records cannot be modified while voting is open.",
+            "danger"
+        )
+        return redirect(url_for("manage_candidates"))
         if action == "add":
             name=request.form.get("name","").strip(); party=request.form.get("party","").strip(); abbr=request.form.get("abbreviation","").strip().upper(); cr=request.form.get("contest_id","")
             contest=Contest.query.filter_by(id=int(cr), election_id=election.id, active=True).first() if cr.isdigit() else None
