@@ -2745,7 +2745,7 @@ def results():
 
 
 @app.route("/admin/audit/clear-view", methods=["POST"])
-@admin_required
+@super_admin_required
 def clear_audit_view():
     validate_csrf(); user=current_user(); latest=AuditEvent.query.order_by(AuditEvent.id.desc()).first()
     state=AuditViewState.query.filter_by(user_id=user.id).first()
