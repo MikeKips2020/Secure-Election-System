@@ -2681,7 +2681,7 @@ def reload_kenya_geography():
     flash(message, "success" if ok else "danger"); return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin", methods=["GET", "POST"])
-@admin_required
+@super_admin_required
 def admin_dashboard():
     election = get_election()
     user = current_user()
