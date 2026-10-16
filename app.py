@@ -1933,8 +1933,10 @@ def voter_dashboard():
     if not user:
         session.clear()
         return redirect(url_for("login"))
-    if user.role == "admin":
-        return redirect(url_for("admin_dashboard"))
+    # RC11: Only registered voters may access the voter dashboard.
+    if user.role != ROLE_VOTER:
+        flash("Administrator accounts cannot access the voter dashboard.", "warning")
+        return redirect(url_for("home"))
     election = get_election()
     contests = eligible_contests_for(user)
     contest_ids = [contest.id for contest in contests]
