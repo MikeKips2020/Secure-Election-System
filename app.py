@@ -932,13 +932,15 @@ with app.app_context():
     geo_ok, geo_message = seed_kenya_electoral_geography()
     print(f"[INFO] Kenya geography: {geo_message}")
     get_election()
+   
+    # RC11: Preserve existing administrator roles during application startup.
     if ADMIN_EMAIL:
         admin_user = User.query.filter_by(email=ADMIN_EMAIL).first()
-        if admin_user and admin_user.role != "admin":
-            admin_user.role = "admin"
-            db.session.commit()
-            print(f"[INFO] Promoted {ADMIN_EMAIL} to administrator.")
 
+        if admin_user and admin_user.role == ROLE_VOTER:
+            admin_user.role = ROLE_LEGACY_ADMIN
+            db.session.commit()
+            print("[INFO] Configured administrator account from ADMIN_EMAIL.")
 
 # ----------------------------------------------------------------------------
 # Templates (inline, single-file requirement)
