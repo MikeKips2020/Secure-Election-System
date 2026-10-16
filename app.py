@@ -2346,9 +2346,13 @@ def manage_candidates():
     election = get_election()
     if request.method == "POST":
         validate_csrf()
-        action = request.form.get("action")
-          # RC11: Prevent candidate changes while voting is open.
-    if election.is_open and action in {"add", "edit", "toggle"}:
+               action = request.form.get("action")
+
+        # RC11: Protect candidate records during and after voting.
+        if action in {"add", "edit", "toggle"} and (
+            election.is_open
+            or Vote.query.filter_by(election_id=election.id).first() is not None
+        ):
         log_event(
             "CANDIDATE_CHANGE_BLOCKED",
             "WARNING",
