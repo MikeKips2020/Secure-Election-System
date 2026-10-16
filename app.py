@@ -2338,7 +2338,8 @@ def candidate_confirmation(candidate_id, contest_id):
     election = ElectionSetting.query.get_or_404(contest.election_id)
     return render_template_string(CANDIDATE_CONFIRMATION_HTML,
         candidate=candidate, contest=contest, election=election, area=contest_area_name(contest))
-
+@app.route("/admin/candidates", methods=["GET", "POST"])
+@admin_required
 def manage_candidates():
     user = current_user()
     election = get_election()
@@ -2461,7 +2462,7 @@ def manage_candidates():
 
 
 @app.route("/admin/regions", methods=["GET", "POST"])
-@admin_required
+@super_admin_required
 def manage_regions():
     user = current_user()
     if request.method == "POST":
@@ -2509,7 +2510,7 @@ def contest_area_name(c):
     x=Ward.query.get(c.ward_id); return x.name if x else "Ward"
 
 @app.route("/admin/geography", methods=["GET","POST"])
-@admin_required
+@super_admin_required
 def manage_geography():
     if request.method=="POST":
         validate_csrf(); kind=request.form.get("kind"); name=request.form.get("name","").strip()
@@ -2575,7 +2576,7 @@ def manage_elections():
     return render_template_string(ELECTIONS_RC7,elections=elections,contest_counts=counts,counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(),by_positions=POSITIONS)
 
 @app.route("/admin/contests", methods=["GET","POST"])
-@admin_required
+@super_admin_required
 def manage_contests():
     current_election=get_election()
     election=current_election
@@ -2593,6 +2594,22 @@ def manage_contests():
         validate_csrf()
         # POST always targets the current election; GET selection is view-only.
         election=current_election
+              # RC11: Protect elections once voting has opened or votes exist.
+        if election.is_open or Vote.query.filter_by(
+            election_id=election.id
+        ).first() is not None:
+            log_event(
+                "CONTEST_CHANGE_BLOCKED",
+                "WARNING",
+                current_user().id,
+                f"election={election.id}"
+            )
+            flash(
+                "Contest changes are not permitted once voting has "
+                "opened or votes have been recorded.",
+                "danger"
+            )
+            return redirect(url_for("manage_contests"))
         if election.election_type=="general":
             flash("General Election contests are protected and generated automatically from verified electoral geography.","warning")
             return redirect(url_for("manage_contests"))
