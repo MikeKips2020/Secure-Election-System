@@ -2666,7 +2666,9 @@ def manage_contests():
 
 @app.route("/results")
 def results():
-    election=get_election(); user=current_user(); is_admin=bool(user and user.role=="admin")
+    election = get_election()
+    user = current_user()
+    is_admin = bool(user and user.role in ADMIN_ROLES)
     votes=Vote.query.filter_by(election_id=election.id).order_by(Vote.id.asc()).all(); previous_hash=GENESIS_HASH
     integrity_status="VALID"; verified_count=0; invalid_ballots=0; break_point=None
     contest_tallies={}; legacy_tally={}; verified_contest_ballots={}
