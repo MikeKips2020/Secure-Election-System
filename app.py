@@ -501,7 +501,7 @@ def compute_chain_hash(encrypted_vote_str, previous_hash):
 def eligible_contests_for(user):
     """Return active contests this voter is entitled to participate in."""
     if not user or user.role != ROLE_VOTER:
-    return []
+        return []
     q = Contest.query.filter_by(active=True, election_id=get_election().id)
     contests = []
     for c in q.order_by(Contest.id).all():
