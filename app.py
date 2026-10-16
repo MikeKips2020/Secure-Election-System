@@ -2765,7 +2765,7 @@ def full_audit_log():
     return render_template_string(AUDIT_LOG_HTML,events=events,event_filter=event_filter,severity_filter=severity_filter)
 
 @app.route("/admin/geography/load", methods=["POST"])
-@admin_required
+@super_admin_required
 def reload_kenya_geography():
     validate_csrf(); user=current_user(); ok,message=seed_kenya_electoral_geography(force=True)
     log_event("KENYA_GEOGRAPHY_LOAD", "INFO" if ok else "ERROR", user.id, message)
