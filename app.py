@@ -2802,7 +2802,7 @@ def admin_dashboard():
         ADMIN_HTML,
         election=election,
         election_open=election_is_open(election),
-        registered_voters=User.query.filter(User.role != "admin").count(),
+        registered_voters=User.query.filter(User.role == ROLE_VOTER).count(),
         total_votes=Vote.query.filter_by(election_id=election.id).count(),
         events=events,
     )
