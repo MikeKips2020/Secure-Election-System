@@ -2404,10 +2404,45 @@ def manage_candidates():
                 if symbol: c.party_symbol_data=symbol
                 db.session.commit(); log_event("CANDIDATE_EDITED","WARNING",user.id,f"{c.id}: {c.name}")
                 flash("Candidate details updated.","success"); return redirect(url_for("manage_candidates"))
-        elif action == "toggle":
-            cid=request.form.get("candidate_id",""); c=Candidate.query.get(int(cid)) if cid.isdigit() else None
-            if c:
-                c.status="withdrawn" if c.status=="active" else "active"; db.session.commit(); log_event("CANDIDATE_STATUS_CHANGED","WARNING",user.id,f"{c.id}: {c.status}"); flash("Candidate status updated.","success"); return redirect(url_for("manage_candidates"))
+       elif action == "toggle":
+    cid = request.form.get("candidate_id", "")
+    c = Candidate.query.get(int(cid)) if cid.isdigit() else None
+
+    if not c:
+        abort(404)
+
+    # Verify candidate belongs to the current election.
+    belongs_to_election = (
+        db.session.query(ContestCandidate.id)
+        .join(Contest, Contest.id == ContestCandidate.contest_id)
+        .filter(
+            ContestCandidate.candidate_id == c.id,
+            Contest.election_id == election.id
+        )
+        .first()
+    )
+
+    if not belongs_to_election:
+        log_event(
+            "UNAUTHORIZED_CANDIDATE_CHANGE",
+            "WARNING",
+            user.id,
+            f"Candidate {c.id} does not belong to election {election.id}"
+        )
+        abort(403)
+
+    c.status = "withdrawn" if c.status == "active" else "active"
+    db.session.commit()
+
+    log_event(
+        "CANDIDATE_STATUS_CHANGED",
+        "WARNING",
+        user.id,
+        f"{c.id}: {c.status}; election={election.id}"
+    )
+
+    flash("Candidate status updated.", "success")
+    return redirect(url_for("manage_candidates"))
     contests=Contest.query.filter_by(active=True,election_id=election.id).order_by(Contest.id).all()
     counties=Region.query.filter(Region.code!="LEGACY",Region.active==True).order_by(Region.name).all()
     cons=Constituency.query.filter_by(active=True).order_by(Constituency.name).all(); ws=Ward.query.filter_by(active=True).order_by(Ward.name).all()
