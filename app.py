@@ -2236,7 +2236,23 @@ def reset_password(token):
 def vote():
     user = current_user()
     if not user:
-        session.clear(); return redirect(url_for("login"))
+        session.clear()
+        return redirect(url_for("login"))
+
+    # RC11: Only voter accounts may access or submit ballots.
+    if user.role != ROLE_VOTER:
+        log_event(
+            "ADMIN_VOTE_ACCESS_BLOCKED",
+            "WARNING",
+            user.id,
+            f"role={user.role}"
+        )
+        flash(
+            "Administrator accounts are not permitted to vote.",
+            "danger"
+        )
+        return redirect(url_for("home"))
+
     election = get_election()
     if not election_is_open(election):
         flash("Voting is closed. You can review your ballot submission status below.", "info"); return redirect(url_for("voter_dashboard"))
