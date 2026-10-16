@@ -396,19 +396,55 @@ def voter_area(user):
 app.jinja_env.globals["voter_area"] = voter_area
 
 
+# RC11 — General administrative access
 def admin_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         user = current_user()
+
         if not user:
             flash("Please log in to continue.", "warning")
             return redirect(url_for("login"))
-        if user.role != "admin":
-            log_event("UNAUTHORIZED_ADMIN_ACCESS", "WARNING", user.id,
-                      f"Attempted access to {request.path}")
-            flash("Administrator access is required.", "danger")
-            return redirect(url_for("home"))
+
+        if user.role not in ADMIN_ROLES:
+            log_event(
+                "UNAUTHORIZED_ADMIN_ACCESS",
+                "WARNING",
+                user.id,
+                f"Attempted access to {request.path}"
+            )
+            abort(403)
+
         return view(*args, **kwargs)
+
+    return wrapped
+
+
+# RC11 — Super Administrator access only
+def super_admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        user = current_user()
+
+        if not user:
+            flash("Please log in to continue.", "warning")
+            return redirect(url_for("login"))
+
+        # Legacy admin remains recognised during migration.
+        if user.role not in {
+            ROLE_SUPER_ADMIN,
+            ROLE_LEGACY_ADMIN
+        }:
+            log_event(
+                "UNAUTHORIZED_SUPER_ADMIN_ACCESS",
+                "WARNING",
+                user.id,
+                f"Attempted access to {request.path}"
+            )
+            abort(403)
+
+        return view(*args, **kwargs)
+
     return wrapped
 
 
