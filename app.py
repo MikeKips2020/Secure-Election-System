@@ -2484,7 +2484,7 @@ def _build_general_election_contests(election_id):
     return created
 
 @app.route("/admin/elections", methods=["GET","POST"])
-@admin_required
+@super_admin_required
 def manage_elections():
     user=current_user()
     if request.method=="POST":
