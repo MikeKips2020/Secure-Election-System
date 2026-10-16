@@ -2339,31 +2339,31 @@ def candidate_confirmation(candidate_id, contest_id):
     return render_template_string(CANDIDATE_CONFIRMATION_HTML,
         candidate=candidate, contest=contest, election=election, area=contest_area_name(contest))
 
-@app.route("/admin/candidates", methods=["GET", "POST"])
-@admin_required
 def manage_candidates():
     user = current_user()
     election = get_election()
+
     if request.method == "POST":
         validate_csrf()
-               action = request.form.get("action")
+        action = request.form.get("action")
 
         # RC11: Protect candidate records during and after voting.
         if action in {"add", "edit", "toggle"} and (
             election.is_open
             or Vote.query.filter_by(election_id=election.id).first() is not None
         ):
-        log_event(
-            "CANDIDATE_CHANGE_BLOCKED",
-            "WARNING",
-            user.id,
-            f"Candidate modification blocked: election={election.id}, action={action}"
-        )
-        flash(
-            "Candidate records cannot be modified while voting is open.",
-            "danger"
-        )
-        return redirect(url_for("manage_candidates"))
+            log_event(
+                "CANDIDATE_CHANGE_BLOCKED",
+                "WARNING",
+                user.id,
+                f"Candidate modification blocked: election={election.id}, action={action}"
+            )
+            flash(
+                "Candidate records cannot be modified while voting is open or after votes have been recorded.",
+                "danger"
+            )
+            return redirect(url_for("manage_candidates"))
+
         if action == "add":
             name=request.form.get("name","").strip(); party=request.form.get("party","").strip(); abbr=request.form.get("abbreviation","").strip().upper(); cr=request.form.get("contest_id","")
             contest=Contest.query.filter_by(id=int(cr), election_id=election.id, active=True).first() if cr.isdigit() else None
@@ -2408,45 +2408,47 @@ def manage_candidates():
                 if symbol: c.party_symbol_data=symbol
                 db.session.commit(); log_event("CANDIDATE_EDITED","WARNING",user.id,f"{c.id}: {c.name}")
                 flash("Candidate details updated.","success"); return redirect(url_for("manage_candidates"))
-       elif action == "toggle":
-    cid = request.form.get("candidate_id", "")
-    c = Candidate.query.get(int(cid)) if cid.isdigit() else None
+       
 
-    if not c:
-        abort(404)
+    elif action == "toggle":
+            cid = request.form.get("candidate_id", "")
+            c = Candidate.query.get(int(cid)) if cid.isdigit() else None
 
-    # Verify candidate belongs to the current election.
-    belongs_to_election = (
-        db.session.query(ContestCandidate.id)
-        .join(Contest, Contest.id == ContestCandidate.contest_id)
-        .filter(
-            ContestCandidate.candidate_id == c.id,
-            Contest.election_id == election.id
-        )
-        .first()
-    )
+            if not c:
+                abort(404)
 
-    if not belongs_to_election:
-        log_event(
-            "UNAUTHORIZED_CANDIDATE_CHANGE",
-            "WARNING",
-            user.id,
-            f"Candidate {c.id} does not belong to election {election.id}"
-        )
-        abort(403)
+            # Verify that the candidate belongs to the current election.
+            belongs_to_election = (
+                db.session.query(ContestCandidate.id)
+                .join(Contest, Contest.id == ContestCandidate.contest_id)
+                .filter(
+                    ContestCandidate.candidate_id == c.id,
+                    Contest.election_id == election.id
+                )
+                .first()
+            )
 
-    c.status = "withdrawn" if c.status == "active" else "active"
-    db.session.commit()
+            if not belongs_to_election:
+                log_event(
+                    "UNAUTHORIZED_CANDIDATE_CHANGE",
+                    "WARNING",
+                    user.id,
+                    f"Candidate {c.id} does not belong to election {election.id}"
+                )
+                abort(403)
 
-    log_event(
-        "CANDIDATE_STATUS_CHANGED",
-        "WARNING",
-        user.id,
-        f"{c.id}: {c.status}; election={election.id}"
-    )
+            c.status = "withdrawn" if c.status == "active" else "active"
+            db.session.commit()
 
-    flash("Candidate status updated.", "success")
-    return redirect(url_for("manage_candidates"))
+            log_event(
+                "CANDIDATE_STATUS_CHANGED",
+                "WARNING",
+                user.id,
+                f"{c.id}: {c.status}; election={election.id}"
+            )
+
+            flash("Candidate status updated.", "success")
+            return redirect(url_for("manage_candidates"))
     contests=Contest.query.filter_by(active=True,election_id=election.id).order_by(Contest.id).all()
     counties=Region.query.filter(Region.code!="LEGACY",Region.active==True).order_by(Region.name).all()
     cons=Constituency.query.filter_by(active=True).order_by(Constituency.name).all(); ws=Ward.query.filter_by(active=True).order_by(Ward.name).all()
