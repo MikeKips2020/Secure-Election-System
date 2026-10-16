@@ -2760,8 +2760,30 @@ def admin_dashboard():
     if request.method == "POST":
         validate_csrf()
         title = request.form.get("title", "").strip()[:200]
+        requested_open = request.form.get("is_open") == "on"
+
+        # RC11: Prevent reopening an election after voting has closed
+        # if any ballots have already been recorded.
+        has_votes = Vote.query.filter_by(
+            election_id=election.id
+        ).first() is not None
+
+        if requested_open and not election.is_open and has_votes:
+            log_event(
+                "ELECTION_REOPEN_BLOCKED",
+                "WARNING",
+                user.id,
+                f"election={election.id}"
+            )
+            flash(
+                "This election cannot be reopened because voting has "
+                "already closed and recorded ballots must be protected.",
+                "danger"
+            )
+            return redirect(url_for("admin_dashboard"))
+
         election.title = title or ELECTION_DEFAULT_TITLE
-        election.is_open = request.form.get("is_open") == "on"
+        election.is_open = requested_open
         election.results_visible = request.form.get("results_visible") == "on"
         db.session.commit()
         log_event(
