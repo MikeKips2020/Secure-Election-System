@@ -173,6 +173,20 @@ GENESIS_HASH = "0" * 64
 NATIONAL_ID_REGEX = re.compile(r"^\d{7,8}$")
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# RC11 — Role-Based Access Control
+ROLE_VOTER = "voter"
+ROLE_GENERAL_ADMIN = "general_admin"
+ROLE_SUPER_ADMIN = "super_admin"
+
+# Temporary compatibility with existing RC10 administrator accounts.
+ROLE_LEGACY_ADMIN = "admin"
+
+ADMIN_ROLES = {
+    ROLE_GENERAL_ADMIN,
+    ROLE_SUPER_ADMIN,
+    ROLE_LEGACY_ADMIN,
+}
+
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ELECTION_DEFAULT_TITLE = os.environ.get(
     "ELECTION_TITLE", "Kenya General Election"
