@@ -2861,11 +2861,29 @@ def admin_dashboard():
                 "danger"
             )
             return redirect(url_for("admin_dashboard"))
+       
+        # RC11: Preserve the identity and closed status of
+        # completed elections containing recorded ballots.
+        if not election.is_open and has_votes:
+            if title != election.title:
+                flash(
+                    "The title of a completed election with recorded "
+                    "votes cannot be changed.",
+                    "danger"
+                )
+                return redirect(url_for("admin_dashboard"))
 
-        election.title = title or ELECTION_DEFAULT_TITLE
-        election.is_open = requested_open
+            # Reopening is already blocked by the check above.
+            # Preserve the closed status explicitly.
+            election.is_open = False
+        else:
+            election.title = title or ELECTION_DEFAULT_TITLE
+            election.is_open = requested_open
+
+        # Super Administrators may control result publication.
         election.results_visible = request.form.get("results_visible") == "on"
         db.session.commit()
+
         log_event(
             "ELECTION_SETTINGS_CHANGED",
             "WARNING",
