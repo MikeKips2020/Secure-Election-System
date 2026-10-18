@@ -1686,7 +1686,13 @@ CANDIDATE_CONFIRMATION_HTML = """
   <div class="d-flex flex-wrap gap-2 mt-4">
    <a class="btn btn-primary" href="{{ url_for('manage_candidates') }}">Add Another Candidate</a>
    <a class="btn btn-outline-primary" href="{{ url_for('manage_candidates') }}">View / Manage Candidates</a>
-   <a class="btn btn-outline-secondary" href="{{ url_for('admin_dashboard') }}">Return to Admin Dashboard</a>
+  
+{% if current_user() and current_user().role == 'general_admin' %}
+   <a class="btn btn-outline-secondary" href="{{ url_for('general_admin_dashboard') }}">Return to General Admin Dashboard</a>
+{% elif current_user() and current_user().role in ('super_admin', 'admin') %}
+   <a class="btn btn-outline-secondary" href="{{ url_for('admin_dashboard') }}">Return to Super Admin Dashboard</a>
+{% endif %}
+
   </div>
  </div></div>
 </div></div>
