@@ -1117,15 +1117,55 @@ window.rc10 = (() => {
     </a>
     <div class="d-flex gap-2">
       <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('results') }}">Audit &amp; Results</a>
-      {% if session.get('user_id') %}
-        {% if current_user() and current_user().role == 'admin' %}
-        <a class="btn btn-warning btn-sm" href="{{ url_for('admin_dashboard') }}">Admin</a>
-        {% else %}
-        <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('voter_dashboard') }}">Dashboard</a>
-         <a class="btn btn-emerald btn-sm" href="{{ url_for('voter_dashboard') }}">My Ballot</a>
-        {% endif %}
-        <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('logout') }}">Logout ({{ session.get('user_name') }})</a>
-      {% else %}
+      
+{% if session.get('user_id') %}
+  {% set nav_user = current_user() %}
+
+  {% if nav_user and nav_user.role in ('super_admin', 'admin') %}
+    <div class="dropdown">
+      <button class="btn btn-warning btn-sm dropdown-toggle"
+              type="button"
+              data-bs-toggle="dropdown"
+              aria-expanded="false">
+        Dashboards
+      </button>
+      <ul class="dropdown-menu dropdown-menu-end">
+        <li>
+          <a class="dropdown-item" href="{{ url_for('admin_dashboard') }}">
+            Super Admin Dashboard
+          </a>
+        </li>
+        <li>
+          <a class="dropdown-item" href="{{ url_for('general_admin_dashboard') }}">
+            General Admin Dashboard
+          </a>
+        </li>
+      </ul>
+    </div>
+
+  {% elif nav_user and nav_user.role == 'general_admin' %}
+    <a class="btn btn-warning btn-sm"
+       href="{{ url_for('general_admin_dashboard') }}">
+      General Admin Dashboard
+    </a>
+
+  {% elif nav_user and nav_user.role == 'voter' %}
+    <a class="btn btn-outline-parchment btn-sm"
+       href="{{ url_for('voter_dashboard') }}">
+      Dashboard
+    </a>
+    <a class="btn btn-emerald btn-sm"
+       href="{{ url_for('voter_dashboard') }}">
+      My Ballot
+    </a>
+  {% endif %}
+
+  <a class="btn btn-outline-parchment btn-sm"
+     href="{{ url_for('logout') }}">
+    Logout ({{ session.get('user_name') }})
+  </a>
+{% else %}
+
         <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('login') }}">Login</a>
         <a class="btn btn-emerald btn-sm" href="{{ url_for('register') }}">Register</a>
       {% endif %}
