@@ -2842,13 +2842,23 @@ def admin_dashboard():
         title = request.form.get("title", "").strip()[:200]
         requested_open = request.form.get("is_open") == "on"
 
-        # RC11: Prevent reopening an election after voting has closed
-        # if any ballots have already been recorded.
+        # RC11: Check whether this election contains recorded ballots.
         has_votes = Vote.query.filter_by(
             election_id=election.id
         ).first() is not None
 
-        if requested_open and not election.is_open and has_votes:
+        # RC11: An election is protected once manually closed
+        # or once its scheduled closing time has passed.
+        completed_with_votes = has_votes and (
+            not election.is_open
+            or (
+                election.closes_at is not None
+                and datetime.utcnow() >= election.closes_at
+            )
+        )
+
+        # Prevent reopening completed elections.
+        if requested_open and completed_with_votes:
             log_event(
                 "ELECTION_REOPEN_BLOCKED",
                 "WARNING",
@@ -2856,15 +2866,14 @@ def admin_dashboard():
                 f"election={election.id}"
             )
             flash(
-                "This election cannot be reopened because voting has "
-                "already closed and recorded ballots must be protected.",
+                "This election cannot be reopened because voting "
+                "has closed and recorded ballots must be protected.",
                 "danger"
             )
             return redirect(url_for("admin_dashboard"))
-       
-        # RC11: Preserve the identity and closed status of
-        # completed elections containing recorded ballots.
-        if not election.is_open and has_votes:
+
+        # Protect the identity of completed elections.
+        if completed_with_votes:
             if title != election.title:
                 flash(
                     "The title of a completed election with recorded "
@@ -2873,37 +2882,52 @@ def admin_dashboard():
                 )
                 return redirect(url_for("admin_dashboard"))
 
-            # Reopening is already blocked by the check above.
-            # Preserve the closed status explicitly.
             election.is_open = False
         else:
             election.title = title or ELECTION_DEFAULT_TITLE
             election.is_open = requested_open
 
         # Super Administrators may control result publication.
-        election.results_visible = request.form.get("results_visible") == "on"
+        election.results_visible = (
+            request.form.get("results_visible") == "on"
+        )
         db.session.commit()
 
         log_event(
             "ELECTION_SETTINGS_CHANGED",
             "WARNING",
             user.id,
-            f"is_open={election.is_open}; results_visible={election.results_visible}"
+            f"is_open={election.is_open}; "
+            f"results_visible={election.results_visible}"
         )
         flash("Election settings updated.", "success")
         return redirect(url_for("admin_dashboard"))
 
-    state=AuditViewState.query.filter_by(user_id=user.id).first()
-    cleared_through=state.cleared_through_id if state else 0
-    events=AuditEvent.query.filter(AuditEvent.id > cleared_through).order_by(AuditEvent.id.desc()).limit(50).all()
+    state = AuditViewState.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    cleared_through = state.cleared_through_id if state else 0
+
+    events = AuditEvent.query.filter(
+        AuditEvent.id > cleared_through
+    ).order_by(
+        AuditEvent.id.desc()
+    ).limit(50).all()
+
     return render_template_string(
         ADMIN_HTML,
         election=election,
         election_open=election_is_open(election),
-        registered_voters=User.query.filter(User.role == ROLE_VOTER).count(),
-        total_votes=Vote.query.filter_by(election_id=election.id).count(),
+        registered_voters=User.query.filter(
+            User.role == ROLE_VOTER
+        ).count(),
+        total_votes=Vote.query.filter_by(
+            election_id=election.id
+        ).count(),
         events=events,
     )
+
 
 # ----------------------------------------------------------------------------
 # RC11: General Administrator Dashboard
