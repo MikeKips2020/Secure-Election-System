@@ -2133,22 +2133,32 @@ def login():
         session.clear()
         session["user_id"] = user.id
         session["user_name"] = user.full_name
-
         flash(f"Welcome, {user.full_name}.", "success")
-        if user.role == "admin":
+
+        # RC11: Redirect users according to their assigned role.
+        if user.role in (ROLE_SUPER_ADMIN, ROLE_LEGACY_ADMIN):
             return redirect(url_for("admin_dashboard"))
-        # V3 completion is per contest via BallotReceipt. The legacy global
-        # User.has_voted flag must not block a voter from remaining contests.
-        return redirect(url_for("voter_dashboard"))
+
+        if user.role == ROLE_GENERAL_ADMIN:
+            return redirect(url_for("general_admin_dashboard"))
+
+        if user.role == ROLE_VOTER:
+            return redirect(url_for("voter_dashboard"))
+
+        # Reject unrecognised roles rather than granting voter access.
+        session.clear()
+        flash("Your account role is not recognised. Contact an administrator.", "danger")
+        return redirect(url_for("login"))
 
     return render_template_string(LOGIN_HTML)
-
 
 @app.route("/logout")
 def logout():
     session.clear()
     flash("You have been logged out.", "info")
     return redirect(url_for("home"))
+
+
 
 
 @app.route("/forgot-password", methods=["GET", "POST"])
