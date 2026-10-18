@@ -2118,16 +2118,18 @@ def login():
             )
             return redirect(url_for("resend_verification"))
 
-        # ADMIN_EMAIL is authoritative for the staging/demo administrator.
-        # Promote on login too, so an account created after service startup gains
-        # admin access without requiring another restart.
+        # RC11: Preserve existing administrator roles during login.
+        # Only promote the configured administrator if currently a voter.
         if ADMIN_EMAIL and user.email.strip().lower() == ADMIN_EMAIL:
-            if user.role != "admin":
-                user.role = "admin"
+            if user.role == ROLE_VOTER:
+                user.role = ROLE_LEGACY_ADMIN
                 db.session.commit()
-                log_event("ADMIN_ROLE_GRANTED", "INFO", user.id,
-                          "Administrator role granted from ADMIN_EMAIL during login.")
-
+                log_event(
+                    "ADMIN_ROLE_GRANTED",
+                    "INFO",
+                    user.id,
+                    "Legacy administrator role granted from ADMIN_EMAIL during login."
+                )
         session.clear()
         session["user_id"] = user.id
         session["user_name"] = user.full_name
