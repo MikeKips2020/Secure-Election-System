@@ -2831,6 +2831,113 @@ def admin_dashboard():
         events=events,
     )
 
+# ----------------------------------------------------------------------------
+# RC11: General Administrator Dashboard
+# ----------------------------------------------------------------------------
+
+@app.route("/admin/general", methods=["GET"])
+@admin_required
+def general_admin_dashboard():
+    election = get_election()
+    user = current_user()
+
+    # This dashboard is read-only.
+    # General Administrators cannot change election settings here.
+
+    registered_voters = User.query.filter(
+        User.role == ROLE_VOTER
+    ).count()
+
+    total_votes = Vote.query.filter_by(
+        election_id=election.id
+    ).count()
+
+    return render_template_string(
+        """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>General Administrator Dashboard</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    background: #f4f7fb;
+                    padding: 30px;
+                    color: #17365d;
+                }
+                .panel {
+                    max-width: 850px;
+                    margin: auto;
+                    background: white;
+                    padding: 25px;
+                    border-radius: 10px;
+                    box-shadow: 0 2px 10px #ddd;
+                }
+                h1 {
+                    color: #12345a;
+                }
+                .stat {
+                    padding: 12px;
+                    margin: 10px 0;
+                    background: #eef3f9;
+                    border-radius: 6px;
+                }
+                a {
+                    display: inline-block;
+                    margin: 10px 12px 0 0;
+                    color: #174c86;
+                    font-weight: bold;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="panel">
+                <h1>General Administrator Dashboard</h1>
+
+                <h2>{{ election.title }}</h2>
+
+                <div class="stat">
+                    Election Status:
+                    <strong>
+                        {{ "Open" if election_open else "Closed" }}
+                    </strong>
+                </div>
+
+                <div class="stat">
+                    Registered Voters:
+                    <strong>{{ registered_voters }}</strong>
+                </div>
+
+                <div class="stat">
+                    Recorded Ballots:
+                    <strong>{{ total_votes }}</strong>
+                </div>
+
+                <h3>Administration</h3>
+
+                <a href="{{ url_for('manage_candidates') }}">
+                    Manage Candidates
+                </a>
+
+                <a href="{{ url_for('full_audit_log') }}">
+                    View Audit Records
+                </a>
+
+                <a href="{{ url_for('logout') }}">
+                    Logout
+                </a>
+            </div>
+        </body>
+        </html>
+        """,
+        election=election,
+        election_open=election_is_open(election),
+        registered_voters=registered_voters,
+        total_votes=total_votes,
+    )
+
 
 # ----------------------------------------------------------------------------
 # Entrypoint
