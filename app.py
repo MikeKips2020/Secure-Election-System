@@ -1714,6 +1714,7 @@ CANDIDATES_HTML = """
  .contest-banner{background:#edf6ff;border-left:4px solid #0d6efd;padding:12px 14px;border-radius:8px}
 </style>
 <div class="row g-4">
+ {% if can_manage_candidates %}
  <div class="col-lg-5"><div class="card"><div class="card-body p-4">
   <h3>Candidate Registration</h3>
   <div class="alert alert-light border small mb-3"><strong>Election:</strong> {{ election.title }}</div>
@@ -1737,13 +1738,15 @@ CANDIDATES_HTML = """
    <button class="btn btn-primary" id="addCandidate" disabled>Add Candidate</button>
   </form>
  </div></div></div>
- <div class="col-lg-7"><div class="card"><div class="card-body p-4">
+ {% endif %}
+ <div class="{{ 'col-lg-7' if can_manage_candidates else 'col-12' }}"><div class="card"><div class="card-body p-4">
   <div class="d-flex justify-content-between gap-3 flex-wrap"><div><h3>Registered Candidates</h3><h6 class="text-muted mb-3" id="candidateHeading">Select a contest</h6></div><div style="min-width:220px"><input id="candidateSearch" class="form-control" placeholder="Search candidates..."></div></div>
   <div id="candidateRows"><div class="text-muted">Choose a position and area to view candidates for that contest.</div></div>
-  <div class="alert alert-info small mt-3">Candidates are withdrawn rather than deleted, preserving ballot history. Editing changes profile details only; the candidate remains attached to the same contest.</div>
+  {% if can_manage_candidates %}<div class="alert alert-info small mt-3">Candidates are withdrawn rather than deleted, preserving ballot history. Editing changes profile details only; the candidate remains attached to the same contest.</div>{% else %}<div class="alert alert-info small mt-3">Read-only candidate directory. Only Super Administrators can change candidate records.</div>{% endif %}
  </div></div></div>
 </div>
 
+{% if can_manage_candidates %}
 <div class="modal fade" id="editCandidateModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
 <form method="POST" enctype="multipart/form-data"><div class="modal-header"><h5 class="modal-title">Edit Candidate</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
 <div class="modal-body"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="edit"><input type="hidden" name="candidate_id" id="edit_id">
@@ -1754,8 +1757,10 @@ CANDIDATES_HTML = """
 <div class="row g-2 mt-1"><div class="col"><label class="form-label">Replace candidate photo</label><input class="form-control" type="file" name="candidate_photo" accept=".jpg,.jpeg,.png,.webp"></div><div class="col"><label class="form-label">Replace party symbol</label><input class="form-control" type="file" name="party_symbol" accept=".jpg,.jpeg,.png,.webp"></div></div>
 </div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary">Save Changes</button></div></form>
 </div></div></div>
+{% endif %}
 
 <script>
+const canManageCandidates={{ can_manage_candidates|tojson }};
 const contests={{ contest_data|tojson }}, counties={{ counties_data|tojson }}, constituencies={{ constituencies_data|tojson }}, wards={{ wards_data|tojson }}, candidateMap={{ candidate_data|tojson }}, csrf={{ csrf_token()|tojson }};
 const pos=document.getElementById('position'),county=document.getElementById('county'),con=document.getElementById('constituency'),ward=document.getElementById('ward');
 const cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),search=document.getElementById('candidateSearch');
@@ -1765,13 +1770,15 @@ function positions(){let seen=[];contests.forEach(c=>{if(!seen.includes(c.positi
 function refreshGeo(){let p=pos.value,needCounty=p&&p!='President',needCon=['Member of Parliament','Member of County Assembly'].includes(p),needWard=p=='Member of County Assembly';cw.style.display=needCounty?'':'none';xw.style.display=needCon?'':'none';ww.style.display=needWard?'':'none';opts(county,counties,'Select County...');opts(con,[],'Select Constituency...');opts(ward,[],'Select Ward...');chooseContest();}
 function refreshCon(){opts(con,constituencies.filter(x=>String(x.county_id)==String(county.value)),'Select Constituency...');opts(ward,[],'Select Ward...');chooseContest();}
 function refreshWard(){opts(ward,wards.filter(x=>String(x.constituency_id)==String(con.value)),'Select Ward...');chooseContest();}
-function chooseContest(){let p=pos.value,c=null;if(p==='President')c=contests.find(x=>x.position===p);else if(p&&county.value)c=contests.find(x=>x.position===p&&String(x.county_id)===String(county.value)&&(!['Member of Parliament','Member of County Assembly'].includes(p)||String(x.constituency_id)===String(con.value))&&(p!=='Member of County Assembly'||String(x.ward_id)===String(ward.value)));currentContestId=c?String(c.id):'';document.getElementById('contest_id').value=currentContestId;document.getElementById('addCandidate').disabled=!c;document.getElementById('selectedArea').textContent=c?('Selected Contest: '+p+' — '+c.area):'Select the required position and electoral area.';document.getElementById('candidateHeading').textContent=c?('Candidates for: '+p+' — '+c.area):'Select a contest';currentRows=c?(candidateMap[currentContestId]||[]):[];renderRows();}
-function renderRows(){let q=search.value.trim().toLowerCase(),rows=currentRows.filter(r=>!q||[r.name,r.party,r.abbreviation,r.candidate_number].join(' ').toLowerCase().includes(q)),box=document.getElementById('candidateRows');if(!rows.length){box.innerHTML='<div class="text-muted">'+(currentRows.length?'No candidates match your search.':'No candidates registered for this contest yet.')+'</div>';return;}box.innerHTML=rows.map(r=>`<div class="candidate-card"><div class="d-flex gap-3 align-items-center">${r.photo_data?`<img class="candidate-photo" src="${r.photo_data}" alt="">`:`<div class="candidate-photo d-flex align-items-center justify-content-center text-muted">Photo</div>`}<div class="flex-grow-1"><div class="d-flex justify-content-between gap-2"><div><strong>${esc(r.name)}</strong>${r.candidate_number?` <span class="badge text-bg-light">No. ${esc(r.candidate_number)}</span>`:''}<div class="text-muted">${esc(r.party)} (${esc(r.abbreviation)})</div></div>${r.party_symbol_data?`<img class="party-symbol" src="${r.party_symbol_data}" alt="">`:''}</div><div class="mt-2"><span class="badge ${r.status==='active'?'text-bg-success':'text-bg-secondary'}">${esc(r.status.toUpperCase())}</span> <button type="button" class="btn btn-sm btn-outline-primary ms-1" onclick="openEditById(${r.id})">Edit</button><form method="POST" class="d-inline"><input type="hidden" name="csrf_token" value="${esc(csrf)}"><input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="${r.id}"><button class="btn btn-sm btn-outline-secondary ms-1">${r.status==='active'?'Withdraw':'Reactivate'}</button></form></div></div></div></div>`).join('');}
+function chooseContest(){let p=pos.value,c=null;if(p==='President')c=contests.find(x=>x.position===p);else if(p&&county.value)c=contests.find(x=>x.position===p&&String(x.county_id)===String(county.value)&&(!['Member of Parliament','Member of County Assembly'].includes(p)||String(x.constituency_id)===String(con.value))&&(p!=='Member of County Assembly'||String(x.ward_id)===String(ward.value)));currentContestId=c?String(c.id):'';if(canManageCandidates){document.getElementById('contest_id').value=currentContestId;document.getElementById('addCandidate').disabled=!c;}document.getElementById('selectedArea').textContent=c?('Selected Contest: '+p+' — '+c.area):'Select the required position and electoral area.';document.getElementById('candidateHeading').textContent=c?('Candidates for: '+p+' — '+c.area):'Select a contest';currentRows=c?(candidateMap[currentContestId]||[]):[];renderRows();}
+function renderRows(){let q=search.value.trim().toLowerCase(),rows=currentRows.filter(r=>!q||[r.name,r.party,r.abbreviation,r.candidate_number].join(' ').toLowerCase().includes(q)),box=document.getElementById('candidateRows');if(!rows.length){box.innerHTML='<div class="text-muted">'+(currentRows.length?'No candidates match your search.':'No candidates registered for this contest yet.')+'</div>';return;}box.innerHTML=rows.map(r=>`<div class="candidate-card"><div class="d-flex gap-3 align-items-center">${r.photo_data?`<img class="candidate-photo" src="${r.photo_data}" alt="">`:`<div class="candidate-photo d-flex align-items-center justify-content-center text-muted">Photo</div>`}<div class="flex-grow-1"><div class="d-flex justify-content-between gap-2"><div><strong>${esc(r.name)}</strong>${r.candidate_number?` <span class="badge text-bg-light">No. ${esc(r.candidate_number)}</span>`:''}<div class="text-muted">${esc(r.party)} (${esc(r.abbreviation)})</div></div>${r.party_symbol_data?`<img class="party-symbol" src="${r.party_symbol_data}" alt="">`:''}</div><div class="mt-2"><span class="badge ${r.status==='active'?'text-bg-success':'text-bg-secondary'}">${esc(r.status.toUpperCase())}</span> ${canManageCandidates?`<button type="button" class="btn btn-sm btn-outline-primary ms-1" onclick="openEditById(${r.id})">Edit</button><form method="POST" class="d-inline"><input type="hidden" name="csrf_token" value="${esc(csrf)}"><input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="${r.id}"><button class="btn btn-sm btn-outline-secondary ms-1">${r.status==='active'?'Withdraw':'Reactivate'}</button></form>`:''}</div></div></div></div>`).join('');}
 function openEditById(id){let r=currentRows.find(x=>String(x.id)===String(id));if(!r)return;document.getElementById('edit_id').value=r.id;document.getElementById('edit_name').value=r.name||'';document.getElementById('edit_party').value=r.party||'';document.getElementById('edit_abbr').value=r.abbreviation||'';document.getElementById('edit_number').value=r.candidate_number||'';document.getElementById('edit_manifesto').value=r.manifesto||'';bootstrap.Modal.getOrCreateInstance(document.getElementById('editCandidateModal')).show();}
 function esc(v){return String(v??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
 function preview(input,img,wrap,removeBtn){let objectUrl=null;function clearSelection(){if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null;}input.value='';img.removeAttribute('src');wrap.classList.add('d-none');}input.addEventListener('change',()=>{if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null;}let f=input.files[0];if(!f){clearSelection();return;}objectUrl=URL.createObjectURL(f);img.src=objectUrl;wrap.classList.remove('d-none');});removeBtn.addEventListener('click',clearSelection);}
+if(canManageCandidates){
 preview(document.getElementById('candidate_photo'),document.getElementById('candidatePreview'),document.getElementById('candidatePreviewWrap'),document.getElementById('removeCandidatePhoto'));
 preview(document.getElementById('party_symbol'),document.getElementById('partyPreview'),document.getElementById('partyPreviewWrap'),document.getElementById('removePartySymbol'));
+}
 pos.addEventListener('change',refreshGeo);county.addEventListener('change',refreshCon);con.addEventListener('change',refreshWard);ward.addEventListener('change',chooseContest);search.addEventListener('input',renderRows);positions();refreshGeo();
 </script>
 {% endblock %}
@@ -2435,6 +2442,12 @@ def manage_candidates():
     election = get_election()
 
     if request.method == "POST":
+        # Authorise on the server before processing any candidate change.
+        # Hiding UI controls alone does not prevent crafted POST requests.
+        if user.role not in {ROLE_SUPER_ADMIN, ROLE_LEGACY_ADMIN}:
+            log_event("UNAUTHORIZED_CANDIDATE_CHANGE", "WARNING", user.id,
+                      f"Blocked candidate modification attempt: {request.path}")
+            abort(403)
         validate_csrf()
         action = request.form.get("action")
 
@@ -2565,7 +2578,7 @@ def manage_candidates():
     for link in ContestCandidate.query.filter(ContestCandidate.contest_id.in_([c.id for c in contests])).all() if contests else []:
         cand=Candidate.query.get(link.candidate_id)
         if cand: candidate_data.setdefault(str(link.contest_id),[]).append({"id":cand.id,"name":cand.name,"party":cand.party,"abbreviation":cand.abbreviation,"candidate_number":cand.candidate_number,"manifesto":cand.manifesto,"photo_data":cand.photo_data,"party_symbol_data":cand.party_symbol_data,"status":cand.status})
-    return render_template_string(CANDIDATES_HTML,election=election,contest_data=contest_data,counties_data=[{"id":x.id,"name":x.name} for x in counties],constituencies_data=[{"id":x.id,"name":x.name,"county_id":x.county_id} for x in cons],wards_data=[{"id":x.id,"name":x.name,"constituency_id":x.constituency_id} for x in ws],candidate_data=candidate_data)
+    return render_template_string(CANDIDATES_HTML,election=election,contest_data=contest_data,counties_data=[{"id":x.id,"name":x.name} for x in counties],constituencies_data=[{"id":x.id,"name":x.name,"county_id":x.county_id} for x in cons],wards_data=[{"id":x.id,"name":x.name,"constituency_id":x.constituency_id} for x in ws],candidate_data=candidate_data,can_manage_candidates=user.role in {ROLE_SUPER_ADMIN, ROLE_LEGACY_ADMIN})
 
 
 @app.route("/admin/regions", methods=["GET", "POST"])
@@ -3057,7 +3070,7 @@ def general_admin_dashboard():
                 <h3>Administration</h3>
 
                 <a href="{{ url_for('manage_candidates') }}">
-                    Manage Candidates
+                    {{ "Manage Candidates" if user.role in ("super_admin", "admin") else "View Candidates" }}
                 </a>
 
                 <a href="{{ url_for('full_audit_log') }}">
