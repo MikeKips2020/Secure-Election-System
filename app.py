@@ -21,7 +21,7 @@ import os
 import re
 import json
 import base64
-import hashlibA
+import hashlib
 import secrets
 import urllib.request
 import urllib.error
