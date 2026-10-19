@@ -3088,6 +3088,7 @@ def general_admin_dashboard():
         election_open=election_is_open(election),
         registered_voters=registered_voters,
         total_votes=total_votes,
+        user=user,
     )
 
 
