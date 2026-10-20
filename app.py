@@ -223,6 +223,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     has_voted = db.Column(db.Boolean, default=False, nullable=False)
     email_verified = db.Column(db.Boolean, default=False, nullable=False)
+    account_enabled = db.Column(db.Boolean, default=True, nullable=False)
     email_verification_token = db.Column(db.String(500), unique=True, nullable=True)
     email_verification_expires_at = db.Column(db.DateTime, nullable=True)
     role = db.Column(db.String(20), default="voter", nullable=False)
@@ -387,7 +388,8 @@ def current_user():
     uid = session.get("user_id")
     if not uid:
         return None
-    return User.query.get(uid)
+    user = db.session.get(User, uid)
+    return user if user and user.account_enabled else None
 
 
 # Expose the authenticated database user to every Jinja template.
@@ -653,6 +655,11 @@ def migrate_database():
         if "email_verification_expires_at" not in existing_columns:
             connection.execute(text(
                 "ALTER TABLE users ADD COLUMN email_verification_expires_at TIMESTAMP"
+            ))
+
+        if "account_enabled" not in existing_columns:
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN account_enabled BOOLEAN NOT NULL DEFAULT TRUE"
             ))
 
         if "role" not in existing_columns:
@@ -1653,6 +1660,7 @@ ADMIN_HTML = """
           {% if election.election_date %}<span class="ms-2 text-muted">{{ election.election_date.strftime('%d %B %Y') }}</span>{% endif %}
         </div>
         <div class="d-flex gap-2 flex-wrap mb-3">
+          <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_voters') }}">Manage Voters</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_candidates') }}">Manage Candidates</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_regions') }}">Manage Counties</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_geography') }}">Constituencies & Wards</a>
@@ -2022,6 +2030,45 @@ VOTER_DASHBOARD_HTML = """
 {% endblock %}
 """
 
+VOTERS_HTML = """
+{% extends "base.html" %}
+{% block title %}Voter Management — RC11{% endblock %}
+{% block content %}
+<h2>Voter Management</h2>
+<p class="text-muted">Registration and participation status only. Candidate selections and ballot contents are never displayed.</p>
+<div class="d-flex gap-2 flex-wrap mb-3">
+  <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_dashboard') if can_manage else url_for('general_admin_dashboard') }}">Back to Dashboard</a>
+  <span class="badge text-bg-secondary align-self-center">{{ total }} matching voters</span>
+  {% if not can_manage %}<span class="badge text-bg-info align-self-center">Read-only access</span>{% endif %}
+</div>
+<form method="GET" class="row g-2 mb-3">
+ <div class="col-md-7"><input class="form-control" name="q" maxlength="150" value="{{ search }}" placeholder="Search name or email" aria-label="Search voters"></div>
+ <div class="col-auto"><button class="btn btn-primary">Search</button></div>
+</form>
+<div class="table-responsive"><table class="table table-striped table-sm align-middle">
+<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Email verified</th><th>Electoral area</th><th>Eligible contests</th><th>Ballot receipts</th><th>Account</th>{% if can_manage %}<th>Action</th>{% endif %}</tr></thead>
+<tbody>{% for row in rows %}
+<tr><td>{{ row.user.id }}</td><td>{{ row.user.full_name }}</td><td>{{ row.user.email }}</td>
+<td>{{ 'Yes' if row.user.email_verified else 'No' }}</td>
+<td>{{ row.area }}</td><td>{{ row.eligible }}</td><td>{{ row.receipts }}</td>
+<td>{{ 'Enabled' if row.user.account_enabled else 'Suspended' }}</td>
+{% if can_manage %}<td>
+<form method="POST" action="{{ url_for('set_voter_account_status', user_id=row.user.id) }}" onsubmit="return confirm('Confirm changing this voter account status? Existing ballots will remain untouched.');">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<input type="hidden" name="enabled" value="{{ '0' if row.user.account_enabled else '1' }}">
+<button class="btn btn-sm {{ 'btn-outline-danger' if row.user.account_enabled else 'btn-outline-success' }}">{{ 'Suspend' if row.user.account_enabled else 'Restore' }}</button>
+</form></td>{% endif %}</tr>
+{% else %}<tr><td colspan="9">No voters found.</td></tr>{% endfor %}
+</tbody></table></div>
+<div class="d-flex gap-3 mt-3">
+{% if page > 1 %}<a href="{{ url_for('manage_voters', q=search, page=page-1) }}">Previous</a>{% endif %}
+<span>Page {{ page }} of {{ pages }}</span>
+{% if page < pages %}<a href="{{ url_for('manage_voters', q=search, page=page+1) }}">Next</a>{% endif %}
+</div>
+<p class="small text-muted mt-3">Suspension blocks login and authenticated access. It never deletes voters, receipts, encrypted ballots, or audit records. Participation totals are not evidence of individual candidate choices.</p>
+{% endblock %}
+"""
+
 app.jinja_loader = DictLoader({
     "base.html": BASE_HTML,
     "home.html": HOME_HTML,
@@ -2033,6 +2080,7 @@ app.jinja_loader = DictLoader({
     "vote.html": VOTE_HTML,
     "results.html": RESULTS_HTML,
     "admin.html": ADMIN_HTML,
+    "voters.html": VOTERS_HTML,
     "audit_log.html": AUDIT_LOG_HTML,
     "candidates.html": CANDIDATES_HTML,
     "candidate_confirmation.html": CANDIDATE_CONFIRMATION_HTML,
@@ -2234,7 +2282,7 @@ def login():
             (db.func.lower(User.email) == identifier) | (User.national_id == identifier)
         ).first()
 
-        if not user or not user.check_password(password):
+        if not user or not user.account_enabled or not user.check_password(password):
             flash("Invalid credentials.", "danger")
             return render_template_string(LOGIN_HTML)
 
@@ -3067,6 +3115,66 @@ def admin_dashboard():
 # RC11: General Administrator Dashboard
 # ----------------------------------------------------------------------------
 
+@app.route("/admin/voters", methods=["GET"])
+@admin_required
+def manage_voters():
+    user = current_user()
+    can_manage = user.role in (ROLE_SUPER_ADMIN, ROLE_LEGACY_ADMIN)
+    search = request.args.get("q", "").strip()[:150]
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except ValueError:
+        page = 1
+    query = User.query.filter(User.role == ROLE_VOTER)
+    if search:
+        term = "%" + search + "%"
+        query = query.filter(db.or_(User.full_name.ilike(term), User.email.ilike(term)))
+    total = query.count()
+    pages = max(1, (total + 24) // 25)
+    page = min(page, pages)
+    voters = query.order_by(User.id).offset((page - 1) * 25).limit(25).all()
+    election = get_election()
+    contests = Contest.query.filter_by(election_id=election.id, active=True).all()
+    ids = [v.id for v in voters]
+    counts = {}
+    if ids:
+        counts = dict(db.session.query(BallotReceipt.user_id, db.func.count(BallotReceipt.id))
+                      .join(Contest, Contest.id == BallotReceipt.contest_id)
+                      .filter(BallotReceipt.user_id.in_(ids), Contest.election_id == election.id)
+                      .group_by(BallotReceipt.user_id).all())
+    rows = []
+    for v in voters:
+        eligible = sum(1 for c in contests if (
+            c.scope_level == "national" or
+            (c.scope_level == "county" and v.region_id and c.county_id == v.region_id) or
+            (c.scope_level == "constituency" and v.constituency_id and c.constituency_id == v.constituency_id) or
+            (c.scope_level == "ward" and v.ward_id and c.ward_id == v.ward_id)))
+        area = voter_area(v)
+        rows.append(dict(user=v, eligible=eligible, receipts=counts.get(v.id, 0),
+                         area=" / ".join((area["county"], area["constituency"], area["ward"]))))
+    return render_template_string(VOTERS_HTML, rows=rows, total=total, pages=pages,
+                                  page=page, search=search, can_manage=can_manage)
+
+
+@app.route("/admin/voters/<int:user_id>/status", methods=["POST"])
+@super_admin_required
+def set_voter_account_status(user_id):
+    validate_csrf()
+    voter = db.session.get(User, user_id)
+    enabled = request.form.get("enabled")
+    if not voter or voter.role != ROLE_VOTER or enabled not in ("0", "1"):
+        abort(400, description="Invalid voter account status request.")
+    new_value = enabled == "1"
+    if voter.account_enabled != new_value:
+        voter.account_enabled = new_value
+        db.session.add(AuditEvent(event_type="VOTER_ACCOUNT_STATUS_CHANGED", severity="WARNING",
+                                  user_id=current_user().id,
+                                  details=f"voter_id={voter.id}; enabled={new_value}"))
+        db.session.commit()
+    flash("Voter account status updated. Existing ballots and receipts were preserved.", "success")
+    return redirect(url_for("manage_voters"))
+
+
 @app.route("/admin/general", methods=["GET"])
 @admin_required
 def general_admin_dashboard():
@@ -3148,6 +3256,7 @@ def general_admin_dashboard():
                 </div>
 
                 <h3>Administration</h3>
+                <a href="{{ url_for('manage_voters') }}">View Voters (read-only)</a>
 
                 <a href="{{ url_for('manage_candidates') }}">
                     {{ "Manage Candidates" if user.role in ("super_admin", "admin") else "View Candidates" }}
