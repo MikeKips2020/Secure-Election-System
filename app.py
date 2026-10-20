@@ -53,6 +53,14 @@ if _is_production and not _secret_key:
     raise RuntimeError("SECRET_KEY must be configured as a persistent environment variable in production.")
 app.secret_key = _secret_key or secrets.token_hex(32)
 
+# RC11 security hardening: secure session transport and bounded request bodies.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=_is_production,
+    SESSION_COOKIE_SAMESITE="Lax",
+    MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+)
+
 # Render may supply postgres:// or postgresql://.
 # requirements.txt installs psycopg2-binary, so explicitly tell SQLAlchemy
 # to use the psycopg2 driver rather than SQLAlchemy 2.1's psycopg default.
@@ -341,6 +349,14 @@ class AuditViewState(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class AuthRateLimit(db.Model):
+    """Database-backed fixed-window counters shared across Gunicorn workers."""
+    __tablename__ = "auth_rate_limits"
+    key = db.Column(db.String(100), primary_key=True)
+    window_start = db.Column(db.DateTime, nullable=False)
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+
+
 class PasswordResetToken(db.Model):
     __tablename__ = "password_reset_tokens"
 
@@ -531,6 +547,59 @@ def registered_voters_for_contest(contest):
     elif contest.scope_level == "constituency": q = q.filter(User.constituency_id == contest.constituency_id)
     elif contest.scope_level == "ward": q = q.filter(User.ward_id == contest.ward_id)
     return q.count()
+
+
+def _rate_key(scope, value):
+    # Never persist raw login identifiers or client IPs in the rate-limit table.
+    return scope + ":" + hashlib.sha256((value or "unknown").encode("utf-8")).hexdigest()
+
+
+def _client_ip():
+    # Do not trust client-supplied X-Forwarded-For values here.
+    return request.remote_addr or "unknown"
+
+
+def _rate_limit_hit(scope, value, max_attempts, window_seconds):
+    """Atomically increment a shared counter; True means request is blocked.
+
+    PostgreSQL UPSERT locks the counter row across processes. SQLite's ON
+    CONFLICT support is used for local development. Fails closed on DB errors.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    key = _rate_key(scope, value)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=window_seconds)
+    table = AuthRateLimit.__table__
+    dialect = db.engine.dialect.name
+    try:
+        if dialect == "postgresql":
+            stmt = pg_insert(table).values(key=key, window_start=now, attempts=1)
+        elif dialect == "sqlite":
+            stmt = sqlite_insert(table).values(key=key, window_start=now, attempts=1)
+        else:
+            raise RuntimeError("Unsupported rate-limit database dialect")
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[table.c.key],
+            set_={
+                "window_start": db.case((table.c.window_start < cutoff, now), else_=table.c.window_start),
+                "attempts": db.case((table.c.window_start < cutoff, 1), else_=table.c.attempts + 1),
+            },
+        ).returning(table.c.attempts)
+        attempts = db.session.execute(stmt).scalar_one()
+        db.session.commit()
+        return attempts > max_attempts
+    except Exception:
+        db.session.rollback()
+        app.logger.exception("Rate limiter unavailable; blocking sensitive request")
+        abort(503, description="Authentication temporarily unavailable. Please try later.")
+
+
+def _enforce_auth_limit(scope, identifier="", max_ip=30, max_identifier=8, window=900):
+    if _rate_limit_hit(scope + ":ip", _client_ip(), max_ip, window):
+        abort(429, description="Too many requests. Please try again later.")
+    if identifier and _rate_limit_hit(scope + ":account", identifier, max_identifier, window):
+        abort(429, description="Too many requests. Please try again later.")
 
 
 def generate_csrf_token():
@@ -2104,6 +2173,7 @@ def resend_verification():
     if request.method == "POST":
         validate_csrf()
         email = request.form.get("email", "").strip().lower()
+        _enforce_auth_limit("resend-verification", email, max_ip=12, max_identifier=3, window=3600)
         user = User.query.filter_by(email=email).first()
 
         if user and not user.email_verified:
@@ -2157,6 +2227,7 @@ def login():
     if request.method == "POST":
         validate_csrf()
         identifier = request.form.get("identifier", "").strip().lower()
+        _enforce_auth_limit("login", identifier)
         password = request.form.get("password", "")
 
         user = User.query.filter(
@@ -2212,6 +2283,7 @@ def forgot_password():
     if request.method == "POST":
         validate_csrf()
         email = request.form.get("email", "").strip().lower()
+        _enforce_auth_limit("password-reset", email, max_ip=12, max_identifier=3, window=3600)
         user = User.query.filter_by(email=email).first()
 
         if user:
