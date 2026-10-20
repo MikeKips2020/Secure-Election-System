@@ -2931,6 +2931,12 @@ def admin_dashboard():
         # Protect the identity of completed elections.
         if completed_with_votes:
             if title != election.title:
+                log_event(
+                    "ELECTION_RENAME_BLOCKED",
+                    "WARNING",
+                    user.id,
+                    f"election={election.id}"
+                )
                 flash(
                     "The title of a completed election with recorded "
                     "votes cannot be changed.",
