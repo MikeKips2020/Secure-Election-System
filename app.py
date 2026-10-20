@@ -1108,7 +1108,7 @@ window.rc10 = (() => {
  document.addEventListener('keydown',blockLocked,true);
  document.addEventListener('change',event=>{if(navigation&&event.target.id==='viewElection'){event.target.value=event.target.dataset.rc10Value;event.stopImmediatePropagation();}},true);
  window.addEventListener('pageshow',()=>{
-  navigation=false;document.querySelectorAll('[data-rc10-submitting]').forEach(form=>{delete form.dataset.rc10Submitting;form.removeAttribute('aria-busy');});
+  navigation=false;document.querySelectorAll('form[data-rc10-submitting]').forEach(form=>{delete form.dataset.rc10Submitting;form.removeAttribute('aria-busy');});
   document.querySelectorAll('[data-rc10-locked]').forEach(el=>{delete el.dataset.rc10Locked;el.removeAttribute('aria-disabled');el.removeAttribute('aria-busy');el.style.pointerEvents='';});document.querySelectorAll('[data-rc10-election-feedback]').forEach(box=>{box.hidden=true;});if(!pending)status('');
  });
  function election(select){
@@ -1647,19 +1647,52 @@ RESULTS_HTML = """
 ADMIN_HTML = """
 {% extends "base.html" %}
 {% block content %}
+<style>
+.rc11-admin .dashboard-hero{background:linear-gradient(115deg,#12233d,#214365);color:white;border-radius:1rem;padding:1.65rem 1.8rem;margin-bottom:1.25rem}
+.rc11-admin .dashboard-hero h1{font-size:clamp(1.5rem,2.5vw,2.1rem);font-weight:800;margin:0}
+.rc11-admin .dashboard-hero p{color:#d6e3f1;margin:.4rem 0 0}
+.rc11-admin .metric-card{height:100%;border-radius:.9rem;border:1px solid #dbe4eb;background:#fff;padding:1.1rem 1.25rem}
+.rc11-admin .metric-label{color:#4d6074;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.045em}
+.rc11-admin .metric-value{color:#12233d;font-size:clamp(1.55rem,2.8vw,2.15rem);font-weight:800;line-height:1.3}
+.rc11-admin .dashboard-section{border-radius:1rem;overflow:hidden}
+.rc11-admin .dashboard-section h3{font-size:1.2rem;font-weight:750;color:#12233d}
+.rc11-admin .dashboard-nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:.65rem}
+.rc11-admin .dashboard-nav a{min-height:3rem;display:flex;align-items:center;justify-content:center;text-align:center;font-weight:650}
+.rc11-admin .admin-election-title{color:#12233d!important;font-weight:850!important}
+.rc11-admin .dashboard-status{display:inline-flex;align-items:center;gap:.35rem;padding:.3rem .65rem;border-radius:2rem;font-weight:750;font-size:.83rem}
+.rc11-admin .dashboard-status.open{background:#d6f2e5;color:#075b3b}
+.rc11-admin .dashboard-status.closed{background:#e9edf1;color:#374151}
+.rc11-admin .dashboard-status::before{content:'';width:.5rem;height:.5rem;border-radius:50%;background:currentColor}
+.rc11-admin .dashboard-settings{background:#f8fafc;border:1px solid #e1e7ef;border-radius:.8rem;padding:1.1rem}
+.rc11-admin .dashboard-section .card-body{padding:1.4rem!important}
+@media(max-width:575px){.rc11-admin .dashboard-hero{padding:1.25rem}.rc11-admin .dashboard-section .card-body{padding:1rem!important}}
+@media(prefers-reduced-motion:reduce){.rc11-admin *, .rc10-spinner{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+</style>
+<div class="rc11-admin">
+  <header class="dashboard-hero d-flex justify-content-between align-items-center flex-wrap gap-3">
+    <div><div class="small fw-bold text-uppercase" style="letter-spacing:.1em;color:#b9d9f4">RC11 · Super Administrator</div><h1>Election Administration</h1><p>Manage elections, voter records and security controls from one dashboard.</p></div>
+    <span class="dashboard-status {{ 'open' if election_open else 'closed' }}" aria-label="Voting status">Voting {{ 'OPEN' if election_open else 'CLOSED' }}</span>
+  </header>
+  <section aria-label="Election overview" class="row g-3 mb-4">
+    <div class="col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">Registered voters</div><div class="metric-value">{{ '{:,}'.format(registered_voters) }}</div><div class="small text-muted">Registered voter accounts</div></div></div>
+    <div class="col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">Recorded ballots</div><div class="metric-value">{{ '{:,}'.format(total_votes) }}</div><div class="small text-muted">Current election only</div></div></div>
+    <div class="col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">Active contests</div><div class="metric-value">{{ active_contests }}</div><div class="small text-muted">Current election only</div></div></div>
+    <div class="col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">Voting status</div><div class="metric-value">{{ 'OPEN' if election_open else 'CLOSED' }}</div><div class="small text-muted">Based on current schedule and settings</div></div></div>
+  </section>
 <div class="row g-4">
   <div class="col-lg-7">
-    <div class="card">
+    <div class="card dashboard-section">
       <div class="card-body p-4">
-        <h3>Administrator Dashboard</h3>
-        <p class="text-muted">Election lifecycle and security controls.</p>
+        <h3>Current Election &amp; Settings</h3>
+        <p class="text-muted">Manage the current election without affecting completed ballots.</p>
         <div class="border-start border-4 border-primary rounded bg-light p-3 mb-4" style="overflow-wrap:anywhere">
           <div class="small text-uppercase text-muted fw-bold">Current Election</div>
           <h2 class="admin-election-title mt-1 mb-2">{{ election.title }}</h2>
           <span class="badge text-bg-primary">{{ 'General Election' if election.election_type == 'general' else 'By-Election' }}</span>
           {% if election.election_date %}<span class="ms-2 text-muted">{{ election.election_date.strftime('%d %B %Y') }}</span>{% endif %}
         </div>
-        <div class="d-flex gap-2 flex-wrap mb-3">
+        <h3 class="mt-4 mb-3">Quick Access</h3>
+        <nav class="dashboard-nav mb-4" aria-label="Administrator tools">
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_voters') }}">Manage Voters</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_candidates') }}">Manage Candidates</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_regions') }}">Manage Counties</a>
@@ -1667,8 +1700,8 @@ ADMIN_HTML = """
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_elections') }}">Manage Elections</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_contests') }}">Election Contests</a>
           <form method="POST" action="{{ url_for('reload_kenya_geography') }}" class="d-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-success btn-sm">Verify / Load Kenya Geography</button></form>
-        </div>
-        <form method="POST">
+        </nav>
+        <form method="POST" class="dashboard-settings">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="mb-3">
             <label class="form-label fw-bold" for="adminElectionTitle">Current election title</label>
@@ -1692,18 +1725,21 @@ ADMIN_HTML = """
     </div>
   </div>
   <div class="col-lg-5">
-    <div class="card">
+    <div class="card dashboard-section">
       <div class="card-body p-4">
-        <h4>System Summary</h4>
-        <p class="mb-1">Registered voters: <strong>{{ registered_voters }}</strong></p>
-        <p class="mb-1">Votes recorded: <strong>{{ total_votes }}</strong></p>
-        <p class="mb-0">Current status: <strong>{{ 'OPEN' if election_open else 'CLOSED' }}</strong></p>
+        <h3>Election at a Glance</h3>
+        <p class="text-muted">The figures above reflect the current election. Recorded ballots count submissions across contests, not necessarily distinct voters.</p>
+        <hr>
+        <div class="d-flex justify-content-between gap-2 mb-3"><span>Election type</span><strong>{{ 'General Election' if election.election_type == 'general' else 'By-Election' }}</strong></div>
+        <div class="d-flex justify-content-between gap-2 mb-3"><span>Results publication</span><strong>{{ 'Enabled' if election.results_visible else 'Hidden' }}</strong></div>
+        <div class="d-flex justify-content-between gap-2 mb-3"><span>Voting availability</span><strong>{{ 'Open' if election_open else 'Closed' }}</strong></div>
+        <div class="alert alert-secondary small mb-0">Security controls and ballot records remain unchanged by this interface redesign.</div>
       </div>
     </div>
   </div>
 </div>
 
-<div class="card mt-4">
+<div class="card dashboard-section mt-4">
   <div class="card-body p-4">
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
       <h4 class="mb-0">Recent Security Audit Events</h4>
@@ -1727,6 +1763,7 @@ ADMIN_HTML = """
       </table>
     </div>
   </div>
+</div>
 </div>
 {% endblock %}
 """
@@ -3106,6 +3143,9 @@ def admin_dashboard():
         ).count(),
         total_votes=Vote.query.filter_by(
             election_id=election.id
+        ).count(),
+        active_contests=Contest.query.filter_by(
+            election_id=election.id, active=True
         ).count(),
         events=events,
     )
