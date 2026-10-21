@@ -53,6 +53,14 @@ if _is_production and not _secret_key:
     raise RuntimeError("SECRET_KEY must be configured as a persistent environment variable in production.")
 app.secret_key = _secret_key or secrets.token_hex(32)
 
+# RC11 security hardening: secure session transport and bounded request bodies.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=_is_production,
+    SESSION_COOKIE_SAMESITE="Lax",
+    MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+)
+
 # Render may supply postgres:// or postgresql://.
 # requirements.txt installs psycopg2-binary, so explicitly tell SQLAlchemy
 # to use the psycopg2 driver rather than SQLAlchemy 2.1's psycopg default.
@@ -173,6 +181,20 @@ GENESIS_HASH = "0" * 64
 NATIONAL_ID_REGEX = re.compile(r"^\d{7,8}$")
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# RC11 — Role-Based Access Control
+ROLE_VOTER = "voter"
+ROLE_GENERAL_ADMIN = "general_admin"
+ROLE_SUPER_ADMIN = "super_admin"
+
+# Temporary compatibility with existing RC10 administrator accounts.
+ROLE_LEGACY_ADMIN = "admin"
+
+ADMIN_ROLES = {
+    ROLE_GENERAL_ADMIN,
+    ROLE_SUPER_ADMIN,
+    ROLE_LEGACY_ADMIN,
+}
+
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 ELECTION_DEFAULT_TITLE = os.environ.get(
     "ELECTION_TITLE", "Kenya General Election"
@@ -201,6 +223,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     has_voted = db.Column(db.Boolean, default=False, nullable=False)
     email_verified = db.Column(db.Boolean, default=False, nullable=False)
+    account_enabled = db.Column(db.Boolean, default=True, nullable=False)
     email_verification_token = db.Column(db.String(500), unique=True, nullable=True)
     email_verification_expires_at = db.Column(db.DateTime, nullable=True)
     role = db.Column(db.String(20), default="voter", nullable=False)
@@ -327,6 +350,14 @@ class AuditViewState(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class AuthRateLimit(db.Model):
+    """Database-backed fixed-window counters shared across Gunicorn workers."""
+    __tablename__ = "auth_rate_limits"
+    key = db.Column(db.String(100), primary_key=True)
+    window_start = db.Column(db.DateTime, nullable=False)
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+
+
 class PasswordResetToken(db.Model):
     __tablename__ = "password_reset_tokens"
 
@@ -345,7 +376,8 @@ class PasswordResetToken(db.Model):
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not session.get("user_id"):
+        if not current_user():
+            session.clear()
             flash("Please log in to continue.", "warning")
             return redirect(url_for("login"))
         return view(*args, **kwargs)
@@ -356,7 +388,8 @@ def current_user():
     uid = session.get("user_id")
     if not uid:
         return None
-    return User.query.get(uid)
+    user = db.session.get(User, uid)
+    return user if user and user.account_enabled else None
 
 
 # Expose the authenticated database user to every Jinja template.
@@ -382,19 +415,55 @@ def voter_area(user):
 app.jinja_env.globals["voter_area"] = voter_area
 
 
+# RC11 — General administrative access
 def admin_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         user = current_user()
+
         if not user:
             flash("Please log in to continue.", "warning")
             return redirect(url_for("login"))
-        if user.role != "admin":
-            log_event("UNAUTHORIZED_ADMIN_ACCESS", "WARNING", user.id,
-                      f"Attempted access to {request.path}")
-            flash("Administrator access is required.", "danger")
-            return redirect(url_for("home"))
+
+        if user.role not in ADMIN_ROLES:
+            log_event(
+                "UNAUTHORIZED_ADMIN_ACCESS",
+                "WARNING",
+                user.id,
+                f"Attempted access to {request.path}"
+            )
+            abort(403)
+
         return view(*args, **kwargs)
+
+    return wrapped
+
+
+# RC11 — Super Administrator access only
+def super_admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        user = current_user()
+
+        if not user:
+            flash("Please log in to continue.", "warning")
+            return redirect(url_for("login"))
+
+        # Legacy admin remains recognised during migration.
+        if user.role not in {
+            ROLE_SUPER_ADMIN,
+            ROLE_LEGACY_ADMIN
+        }:
+            log_event(
+                "UNAUTHORIZED_SUPER_ADMIN_ACCESS",
+                "WARNING",
+                user.id,
+                f"Attempted access to {request.path}"
+            )
+            abort(403)
+
+        return view(*args, **kwargs)
+
     return wrapped
 
 
@@ -450,7 +519,7 @@ def compute_chain_hash(encrypted_vote_str, previous_hash):
 
 def eligible_contests_for(user):
     """Return active contests this voter is entitled to participate in."""
-    if not user or user.role == "admin":
+    if not user or user.role != ROLE_VOTER:
         return []
     q = Contest.query.filter_by(active=True, election_id=get_election().id)
     contests = []
@@ -475,11 +544,64 @@ def candidates_for_contest(contest_id):
 
 
 def registered_voters_for_contest(contest):
-    q = User.query.filter(User.role != "admin")
+    q = User.query.filter(User.role == ROLE_VOTER)
     if contest.scope_level == "county": q = q.filter(User.region_id == contest.county_id)
     elif contest.scope_level == "constituency": q = q.filter(User.constituency_id == contest.constituency_id)
     elif contest.scope_level == "ward": q = q.filter(User.ward_id == contest.ward_id)
     return q.count()
+
+
+def _rate_key(scope, value):
+    # Never persist raw login identifiers or client IPs in the rate-limit table.
+    return scope + ":" + hashlib.sha256((value or "unknown").encode("utf-8")).hexdigest()
+
+
+def _client_ip():
+    # Do not trust client-supplied X-Forwarded-For values here.
+    return request.remote_addr or "unknown"
+
+
+def _rate_limit_hit(scope, value, max_attempts, window_seconds):
+    """Atomically increment a shared counter; True means request is blocked.
+
+    PostgreSQL UPSERT locks the counter row across processes. SQLite's ON
+    CONFLICT support is used for local development. Fails closed on DB errors.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    key = _rate_key(scope, value)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=window_seconds)
+    table = AuthRateLimit.__table__
+    dialect = db.engine.dialect.name
+    try:
+        if dialect == "postgresql":
+            stmt = pg_insert(table).values(key=key, window_start=now, attempts=1)
+        elif dialect == "sqlite":
+            stmt = sqlite_insert(table).values(key=key, window_start=now, attempts=1)
+        else:
+            raise RuntimeError("Unsupported rate-limit database dialect")
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[table.c.key],
+            set_={
+                "window_start": db.case((table.c.window_start < cutoff, now), else_=table.c.window_start),
+                "attempts": db.case((table.c.window_start < cutoff, 1), else_=table.c.attempts + 1),
+            },
+        ).returning(table.c.attempts)
+        attempts = db.session.execute(stmt).scalar_one()
+        db.session.commit()
+        return attempts > max_attempts
+    except Exception:
+        db.session.rollback()
+        app.logger.exception("Rate limiter unavailable; blocking sensitive request")
+        abort(503, description="Authentication temporarily unavailable. Please try later.")
+
+
+def _enforce_auth_limit(scope, identifier="", max_ip=30, max_identifier=8, window=900):
+    if _rate_limit_hit(scope + ":ip", _client_ip(), max_ip, window):
+        abort(429, description="Too many requests. Please try again later.")
+    if identifier and _rate_limit_hit(scope + ":account", identifier, max_identifier, window):
+        abort(429, description="Too many requests. Please try again later.")
 
 
 def generate_csrf_token():
@@ -533,6 +655,11 @@ def migrate_database():
         if "email_verification_expires_at" not in existing_columns:
             connection.execute(text(
                 "ALTER TABLE users ADD COLUMN email_verification_expires_at TIMESTAMP"
+            ))
+
+        if "account_enabled" not in existing_columns:
+            connection.execute(text(
+                "ALTER TABLE users ADD COLUMN account_enabled BOOLEAN NOT NULL DEFAULT TRUE"
             ))
 
         if "role" not in existing_columns:
@@ -877,18 +1004,21 @@ def seed_candidates():
 with app.app_context():
     migrate_database()
     db.create_all()
-    seed_candidates()
-    seed_regions()
-    geo_ok, geo_message = seed_kenya_electoral_geography()
-    print(f"[INFO] Kenya geography: {geo_message}")
+    # Staging: opt in to reference-data seeding and geography repairs.
+    # Existing schema upgrades and table creation remain active for compatibility.
+    # Only enable this on the isolated staging database after reviewing its contents.
+    if os.environ.get("RC11_SEED_GEOGRAPHY_ON_STARTUP", "false").lower() == "true":
+        seed_candidates()
+        seed_regions()
+        geo_ok, geo_message = seed_kenya_electoral_geography()
+        print(f"[INFO] Kenya geography: {geo_message}")
+    else:
+        print("[INFO] RC11 startup skipped candidate/geography seeding and repair.")
     get_election()
-    if ADMIN_EMAIL:
-        admin_user = User.query.filter_by(email=ADMIN_EMAIL).first()
-        if admin_user and admin_user.role != "admin":
-            admin_user.role = "admin"
-            db.session.commit()
-            print(f"[INFO] Promoted {ADMIN_EMAIL} to administrator.")
-
+   
+    # RC11: Roles are assigned explicitly in the database. Never elevate an
+    # existing voter merely because an environment variable matches an email.
+    # Existing super_admin/admin/general_admin roles remain unchanged.
 
 # ----------------------------------------------------------------------------
 # Templates (inline, single-file requirement)
@@ -978,7 +1108,7 @@ window.rc10 = (() => {
  document.addEventListener('keydown',blockLocked,true);
  document.addEventListener('change',event=>{if(navigation&&event.target.id==='viewElection'){event.target.value=event.target.dataset.rc10Value;event.stopImmediatePropagation();}},true);
  window.addEventListener('pageshow',()=>{
-  navigation=false;document.querySelectorAll('[data-rc10-submitting]').forEach(form=>{delete form.dataset.rc10Submitting;form.removeAttribute('aria-busy');});
+  navigation=false;document.querySelectorAll('form[data-rc10-submitting]').forEach(form=>{delete form.dataset.rc10Submitting;form.removeAttribute('aria-busy');});
   document.querySelectorAll('[data-rc10-locked]').forEach(el=>{delete el.dataset.rc10Locked;el.removeAttribute('aria-disabled');el.removeAttribute('aria-busy');el.style.pointerEvents='';});document.querySelectorAll('[data-rc10-election-feedback]').forEach(box=>{box.hidden=true;});if(!pending)status('');
  });
  function election(select){
@@ -1049,6 +1179,33 @@ window.rc10 = (() => {
     .badge-valid { background: var(--emerald); }
     .badge-compromised { background: var(--clay); }
     footer { color: var(--ink-soft); font-size: .85rem; }
+
+/* RC11 professional administration theme: consistent with existing navy/emerald UI */
+.rc11-workspace .rc11-page-header{background:linear-gradient(115deg,#12233d,#234768);color:#fff;border-radius:14px;padding:1.65rem 1.8rem;margin-bottom:1.35rem;box-shadow:0 7px 22px rgba(18,35,61,.12)}
+.rc11-workspace .rc11-page-header h2{font-size:clamp(1.55rem,2.5vw,2rem);font-weight:800;letter-spacing:-.025em;margin:0 0 .35rem}
+.rc11-workspace .rc11-page-header p{color:#e1eaf3!important;margin:0;max-width:72ch}
+.rc11-workspace .rc11-page-header .btn{border-color:#b5cde0;color:#fff}
+.rc11-workspace .rc11-page-header .btn:hover{background:#fff;color:#12233d}
+.rc11-workspace .card{border:1px solid #dce4ed;border-radius:12px;box-shadow:0 4px 14px rgba(18,35,61,.055);overflow:visible}
+.rc11-workspace .card-body{padding:1.45rem}
+.rc11-workspace h4{color:#17375e;font-size:1.15rem;font-weight:750}
+.rc11-workspace .form-label{font-weight:650;color:#294866}
+.rc11-workspace .form-control,.rc11-workspace .form-select{border-color:#cbd7e4;border-radius:7px;min-height:42px}
+.rc11-workspace .form-control:focus,.rc11-workspace .form-select:focus{border-color:#0c8a5f;box-shadow:0 0 0 .2rem rgba(12,138,95,.13)}
+.rc11-workspace .btn-primary{background:#17375e;border-color:#17375e}
+.rc11-workspace .btn-primary:hover{background:#0d2849;border-color:#0d2849}
+.rc11-workspace .btn-outline-primary{color:#17375e;border-color:#6684a5}
+.rc11-workspace .btn-outline-primary:hover{background:#17375e;color:white}
+.rc11-workspace .table thead th{background:#eef3f8;color:#294866;font-size:.8rem;letter-spacing:.035em;text-transform:uppercase;padding:.85rem .75rem;border-bottom:2px solid #dce4ed}
+.rc11-workspace .table tbody td{padding:.8rem .75rem;border-color:#edf1f5}
+.rc11-workspace .table tbody tr:hover{background:#f5f9fc}
+.rc11-workspace .contest-stat{font-size:1.85rem;color:#17375e}
+.rc11-workspace .scope-card{border-left:5px solid #0c8a5f}
+.rc11-workspace .protected-note{border-radius:10px}
+.rc11-workspace .rc11-subheading{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem}
+.rc11-workspace .rc11-subheading:before{content:'';width:5px;height:22px;background:#0c8a5f;border-radius:3px}
+@media(max-width:575px){.rc11-workspace .rc11-page-header{padding:1.25rem}.rc11-workspace .card-body{padding:1rem}}
+
   </style>
 </head>
 <body>
@@ -1065,15 +1222,55 @@ window.rc10 = (() => {
     </a>
     <div class="d-flex gap-2">
       <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('results') }}">Audit &amp; Results</a>
-      {% if session.get('user_id') %}
-        {% if current_user() and current_user().role == 'admin' %}
-        <a class="btn btn-warning btn-sm" href="{{ url_for('admin_dashboard') }}">Admin</a>
-        {% else %}
-        <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('voter_dashboard') }}">Dashboard</a>
-         <a class="btn btn-emerald btn-sm" href="{{ url_for('voter_dashboard') }}">My Ballot</a>
-        {% endif %}
-        <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('logout') }}">Logout ({{ session.get('user_name') }})</a>
-      {% else %}
+      
+{% if session.get('user_id') %}
+  {% set nav_user = current_user() %}
+
+  {% if nav_user and nav_user.role in ('super_admin', 'admin') %}
+    <div class="dropdown">
+      <button class="btn btn-warning btn-sm dropdown-toggle"
+              type="button"
+              data-bs-toggle="dropdown"
+              aria-expanded="false">
+        Dashboards
+      </button>
+      <ul class="dropdown-menu dropdown-menu-end">
+        <li>
+          <a class="dropdown-item" href="{{ url_for('admin_dashboard') }}">
+            Super Admin Dashboard
+          </a>
+        </li>
+        <li>
+          <a class="dropdown-item" href="{{ url_for('general_admin_dashboard') }}">
+            General Admin Dashboard
+          </a>
+        </li>
+      </ul>
+    </div>
+
+  {% elif nav_user and nav_user.role == 'general_admin' %}
+    <a class="btn btn-warning btn-sm"
+       href="{{ url_for('general_admin_dashboard') }}">
+      General Admin Dashboard
+    </a>
+
+  {% elif nav_user and nav_user.role == 'voter' %}
+    <a class="btn btn-outline-parchment btn-sm"
+       href="{{ url_for('voter_dashboard') }}">
+      Dashboard
+    </a>
+    <a class="btn btn-emerald btn-sm"
+       href="{{ url_for('voter_dashboard') }}">
+      My Ballot
+    </a>
+  {% endif %}
+
+  <a class="btn btn-outline-parchment btn-sm"
+     href="{{ url_for('logout') }}">
+    Logout ({{ session.get('user_name') }})
+  </a>
+{% else %}
+
         <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('login') }}">Login</a>
         <a class="btn btn-emerald btn-sm" href="{{ url_for('register') }}">Register</a>
       {% endif %}
@@ -1104,9 +1301,9 @@ HOME_HTML = """
 <style>
 .hero{background:linear-gradient(135deg,#102a43 0%,#12233d 52%,#0b4a3a 100%);border-radius:18px;color:#f7f5ef;overflow:hidden;position:relative;box-shadow:0 14px 36px rgba(18,35,61,.12)}.hero:before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 12% 18%,rgba(217,164,65,.12),transparent 42%),radial-gradient(circle at 90% 78%,rgba(12,138,95,.22),transparent 48%);pointer-events:none}.hero-inner{position:relative;padding:2.8rem 2.5rem}.hero-eyebrow{display:inline-flex;align-items:center;gap:.5rem;font-size:.76rem;letter-spacing:.08em;text-transform:uppercase;color:#d8e9e1;background:rgba(255,255,255,.08);padding:.38rem .78rem;border-radius:999px}.hero-eyebrow .dot{width:7px;height:7px;border-radius:50%;background:#4fd1a0}.hero h1{font-weight:750;line-height:1.08;letter-spacing:-.02em}.hero .lead{color:#d7ddea;max-width:760px}.hero-actions .btn{padding:.65rem 1.35rem;font-weight:650}.status-strip{background:#fff;border:1px solid var(--line);border-radius:14px;padding:1rem 1.25rem;box-shadow:0 5px 18px rgba(18,35,61,.04)}.status-label{font-size:.76rem;text-transform:uppercase;letter-spacing:.06em;color:#667085}.feature-card{height:100%;padding:1.45rem;border-radius:14px}.feature-icon{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-weight:700}.feature-icon.gold{background:rgba(217,164,65,.14)}.feature-icon.green{background:rgba(12,138,95,.14)}.feature-icon.navy{background:rgba(18,35,61,.10)}.feature-title{font-weight:700;margin:.85rem 0 .4rem}.feature-text{color:#4a5568;font-size:.95rem;margin:0}.how-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:1.4rem}.step{display:flex;align-items:center;gap:.65rem;white-space:nowrap}.step-num{width:30px;height:30px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:#eef6ff;color:#17375e;font-weight:700}.academic-note{border-top:1px solid var(--line);color:#667085;font-size:.9rem;padding-top:1.1rem}
 </style>
-<div class="hero mb-3"><div class="hero-inner row align-items-center g-4"><div class="col-lg-8"><span class="hero-eyebrow"><span class="dot"></span> Kenya &middot; Secure Electronic Voting System</span><h1 class="display-5 mt-3">Secure. Verifiable. Transparent.</h1><p class="lead mt-3">A prototype electronic voting platform designed to demonstrate secure voter authentication, encrypted ballot storage, duplicate-vote prevention and verifiable election auditing across Kenya's national and devolved electoral structure.</p><div class="hero-actions d-flex flex-wrap gap-2 mt-4">{% if not session.get('user_id') %}<a href="{{ url_for('register') }}" class="btn btn-emerald btn-lg">Register to Vote</a><a href="{{ url_for('login') }}" class="btn btn-outline-parchment btn-lg">Voter Login</a>{% else %}<a href="{{ url_for('vote') }}" class="btn btn-emerald btn-lg">Open My Ballot</a>{% endif %}<a href="{{ url_for('results') }}" class="btn btn-outline-parchment btn-lg">Election Audit</a></div></div><div class="col-lg-4 text-center"><svg viewBox="0 0 300 250" width="100%" style="max-width:285px" xmlns="http://www.w3.org/2000/svg"><ellipse cx="150" cy="225" rx="92" ry="11" fill="#000" opacity=".16"/><path d="M150 25l75 28v54c0 51-31 88-75 111-44-23-75-60-75-111V53z" fill="#0c8a5f"/><path d="M150 25v193c44-23 75-60 75-111V53z" fill="#08704e"/><rect x="105" y="92" width="90" height="68" rx="8" fill="#f7f5ef"/><path d="M118 91l32-25 32 25" fill="#d9a441"/><path d="M129 124l14 14 31-35" fill="none" stroke="#0c8a5f" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg></div></div></div>
+<div class="hero mb-3"><div class="hero-inner row align-items-center g-4"><div class="col-lg-8"><span class="hero-eyebrow"><span class="dot"></span> Kenya &middot; Secure Electronic Voting System</span><h1 class="display-5 mt-3">Secure. Verifiable. Transparent.</h1><p class="lead mt-3">A prototype electronic voting platform designed to demonstrate secure voter authentication, encrypted ballot storage, duplicate-vote prevention and verifiable election auditing across Kenya's national and devolved electoral structure.</p><div class="hero-actions d-flex flex-wrap gap-2 mt-4">{% if not session.get('user_id') %}<a href="{{ url_for('register') }}" class="btn btn-emerald btn-lg">Register to Vote</a><a href="{{ url_for('login') }}" class="btn btn-outline-parchment btn-lg">Voter Login</a>{% elif current_user() and current_user().role == 'voter' %}<a href="{{ url_for('vote') }}" class="btn btn-emerald btn-lg">Open My Ballot</a>{% endif %}<a href="{{ url_for('results') }}" class="btn btn-outline-parchment btn-lg">Election Audit</a></div></div><div class="col-lg-4 text-center"><svg viewBox="0 0 300 250" width="100%" style="max-width:285px" xmlns="http://www.w3.org/2000/svg"><ellipse cx="150" cy="225" rx="92" ry="11" fill="#000" opacity=".16"/><path d="M150 25l75 28v54c0 51-31 88-75 111-44-23-75-60-75-111V53z" fill="#0c8a5f"/><path d="M150 25v193c44-23 75-60 75-111V53z" fill="#08704e"/><rect x="105" y="92" width="90" height="68" rx="8" fill="#f7f5ef"/><path d="M118 91l32-25 32 25" fill="#d9a441"/><path d="M129 124l14 14 31-35" fill="none" stroke="#0c8a5f" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg></div></div></div>
 <div class="status-strip mb-4"><div class="row g-3 align-items-center"><div class="col-lg-6"><div class="status-label">Current Election</div><strong>{{ election.title }}</strong>{% if election.election_date %}<span class="text-muted"> &middot; {{ election.election_date.strftime('%d %B %Y') }}</span>{% endif %}</div><div class="col-lg-6 text-lg-end"><span class="badge {{ 'text-bg-success' if voting_open else 'text-bg-secondary' }} me-1">Voting {{ 'Open' if voting_open else 'Closed' }}</span><span class="badge {{ 'text-bg-success' if election.results_visible else 'text-bg-secondary' }}">Results {{ 'Released' if election.results_visible else 'Not Released' }}</span></div></div></div>
-{% if session.get('user_id') and current_user() and current_user().role != 'admin' %}{% set area = voter_area(current_user()) %}<div class="card border-0 shadow-sm mb-4"><div class="card-body py-3"><div class="d-flex flex-wrap align-items-center gap-3"><strong>Your Electoral Area</strong><span><strong>County:</strong> {{ area.county }}</span><span><strong>Constituency:</strong> {{ area.constituency }}</span><span><strong>Ward:</strong> {{ area.ward }}</span></div></div></div>{% endif %}
+{% if session.get('user_id') and current_user() and current_user().role == 'voter' %}{% set area = voter_area(current_user()) %}<div class="card border-0 shadow-sm mb-4"><div class="card-body py-3"><div class="d-flex flex-wrap align-items-center gap-3"><strong>Your Electoral Area</strong><span><strong>County:</strong> {{ area.county }}</span><span><strong>Constituency:</strong> {{ area.constituency }}</span><span><strong>Ward:</strong> {{ area.ward }}</span></div></div></div>{% endif %}
 <div class="row g-3 mb-4"><div class="col-md-4"><div class="feature-card card"><div class="feature-icon green">🔒</div><div class="feature-title">Encrypted Ballots</div><p class="feature-text">Ballot selections are encrypted before being stored, helping protect the confidentiality of recorded votes.</p></div></div><div class="col-md-4"><div class="feature-card card"><div class="feature-icon gold">⛓</div><div class="feature-title">Tamper-Evident Audit Chain</div><p class="feature-text">Each ballot is linked through cryptographic hashing, allowing unauthorised modification of stored ballot records to be detected.</p></div></div><div class="col-md-4"><div class="feature-card card"><div class="feature-icon navy">✓</div><div class="feature-title">Independent Verification</div><p class="feature-text">The audit dashboard provides election-integrity information without exposing an individual voter's ballot choice.</p></div></div></div>
 <div class="how-card mb-4"><h4 class="mb-3">How it works</h4><div class="d-flex flex-wrap gap-3 justify-content-between"><div class="step"><span class="step-num">1</span>Register</div><div class="step"><span class="step-num">2</span>Verify Email</div><div class="step"><span class="step-num">3</span>Sign In</div><div class="step"><span class="step-num">4</span>Cast Eligible Ballots</div><div class="step"><span class="step-num">5</span>Verify Election Audit</div></div></div>
 <div class="academic-note text-center"><strong>MSc Computer Science with Cybersecurity Project</strong><br>Secure Electronic Voting System Prototype &middot; Developed for academic demonstration and evaluation.</div>
@@ -1380,8 +1577,24 @@ VOTE_HTML = """
 """
 RESULTS_HTML = """
 {% extends "base.html" %}{% block content %}
-<div class="card mb-4"><div class="card-body p-4"><div class="d-flex justify-content-between gap-3 flex-wrap"><div><h2>{{ '🟢 ELECTION OPEN' if election_open else '🔴 ELECTION CLOSED' }}</h2><p class="mb-1"><strong>{{total_votes}}</strong> encrypted ballot records in the ledger.</p><p class="mb-0">Integrity: <span class="badge {{'text-bg-success' if integrity_status=='VALID' else 'text-bg-danger'}}">{{integrity_status.replace('_',' ')}}</span> &middot; {{verified_count}} verified</p></div><span class="badge {{'text-bg-success' if election_open else 'text-bg-secondary'}} align-self-start">{{'OPEN' if election_open else 'CLOSED'}}</span></div></div></div>
-{% if election_open %}<div class="alert alert-info">Candidate standings are hidden while polls are open.</div>
+<style>
+.rc11-results-hero{background:linear-gradient(115deg,#12233d,#23466a);color:#fff;border-radius:15px;padding:1.5rem 1.7rem;margin-bottom:1rem}
+.rc11-results-hero h1{font-size:clamp(1.45rem,2.6vw,2.05rem);font-weight:800;margin:0}
+.rc11-results-stat{border:1px solid #dce5ed;background:#fff;border-radius:12px;padding:1rem;height:100%}
+.rc11-results-stat small{display:block;color:#53667c;text-transform:uppercase;font-weight:700;letter-spacing:.04em}
+.rc11-results-stat strong{display:block;color:#12233d;font-size:1.55rem}
+.rc11-result-bar{height:8px;background:#e8edf3;border-radius:8px;overflow:hidden;margin-top:.4rem}
+.rc11-result-bar span{display:block;height:100%;border-radius:8px}
+</style>
+<section class="rc11-results-hero"><div class="d-flex justify-content-between align-items-center gap-3 flex-wrap"><div><div class="small fw-semibold" style="color:#b9d7f2;letter-spacing:.1em">RC11 · ELECTION RESULTS &amp; INTEGRITY</div><h1>{{ election.title }}</h1><div class="mt-2">{{ 'Voting open' if election_open else 'Voting closed' }} · {{ 'Administrator view' if is_admin else 'Public / voter view' }}</div></div><span class="badge {{ 'text-bg-success' if election_open else 'text-bg-light' }}">{{ 'OPEN' if election_open else 'CLOSED' }}</span></div></section>
+<div class="row row-cols-2 row-cols-lg-4 g-3 mb-3">
+<div class="col"><div class="rc11-results-stat"><small>Encrypted ballots</small><strong>{{ total_votes }}</strong></div></div>
+<div class="col"><div class="rc11-results-stat"><small>Verified ballots</small><strong>{{ verified_count }}</strong></div></div>
+<div class="col"><div class="rc11-results-stat"><small>Ledger integrity</small><strong class="{{ 'text-success' if integrity_status == 'VALID' else 'text-danger' }}">{{ integrity_status.replace('_',' ') }}</strong></div></div>
+<div class="col"><div class="rc11-results-stat"><small>Results publication</small><strong>{{ 'Released' if election.results_visible and not election_open else 'Unreleased' }}</strong></div></div>
+</div>
+{% if is_admin and not election.results_visible %}<div class="alert alert-info">Administrator-only preview: candidate results have not been published to voters or public visitors.</div>{% endif %}
+{% if election_open %}<div class="alert alert-info">Candidate standings are hidden while polls are open, including for administrators.</div>
 {% elif not show_candidate_results %}<div class="alert alert-warning">Voting is closed, but the administrator has not released final results.</div>
 {% else %}
 <style>
@@ -1393,7 +1606,7 @@ RESULTS_HTML = """
 .results-contest[hidden]{display:none!important}.results-empty{color:#5c6777}
 @media(max-width:575px){.results-pie{width:185px;height:185px}.results-chart-layout{justify-content:center}}
 </style>
-<h3>Final Results by Contest</h3>
+<h3>{{ "Administrator Results Preview" if not election.results_visible else "Final Results by Contest" }}</h3>
 <p class="text-muted">Each pie chart shows the percentage of valid recorded votes for its contest. Turnout is calculated separately using eligible voters.</p>
 <div class="results-controls">
  <div class="row g-3">
@@ -1411,7 +1624,7 @@ RESULTS_HTML = """
   {% if r.cast and r.candidates %}
   <div class="d-flex flex-wrap gap-4 align-items-center mt-3 results-chart-layout">
    <div class="results-pie" role="img" aria-label="Vote share pie chart for {{r.contest.position}} in {{r.area}}" style="background:conic-gradient({% for part in r.pie_parts %}{{part.color}} {{'%.5f'|format(part.start)}}% {{'%.5f'|format(part.end)}}%{% if not loop.last %}, {% endif %}{% endfor %})"></div>
-   <div class="results-legend">{% for part in r.pie_parts %}<div class="results-legend-row"><span class="d-flex align-items-center"><span class="results-swatch" style="background:{{part.color}}"></span><span><strong>{{part.candidate.name}}</strong><br><small class="text-muted">{{part.candidate.party}} ({{part.candidate.abbreviation}})</small></span></span><span class="text-end text-nowrap"><strong>{{part.votes}}</strong> votes<br><small>{{'%.1f'|format(part.percent)}}%</small></span></div>{% endfor %}</div>
+   <div class="results-legend">{% for part in r.pie_parts %}<div class="results-legend-row"><span class="d-flex align-items-center"><span class="results-swatch" style="background:{{part.color}}"></span><span><strong>{{part.candidate.name}}</strong><br><small class="text-muted">{{part.candidate.party}} ({{part.candidate.abbreviation}})</small></span></span><span class="text-end text-nowrap"><strong>{{part.votes}}</strong> votes<br><small>{{'%.1f'|format(part.percent)}}%</small><div class="rc11-result-bar" aria-hidden="true"><span style="width:{{ '%.2f'|format(part.percent) }}%;background:{{part.color}}"></span></div></span></div>{% endfor %}</div>
   </div>
   {% elif r.cast %}<p class="results-empty mt-3 mb-0">Ballots exist for this contest, but no active candidates are available to display. Please review the audit and candidate records.</p>
   {% else %}<p class="results-empty mt-3 mb-0">No ballots recorded for this contest.</p>{% endif %}
@@ -1477,27 +1690,61 @@ RESULTS_HTML = """
 ADMIN_HTML = """
 {% extends "base.html" %}
 {% block content %}
+<style>
+.rc11-admin .dashboard-hero{background:linear-gradient(115deg,#12233d,#214365);color:white;border-radius:1rem;padding:1.65rem 1.8rem;margin-bottom:1.25rem}
+.rc11-admin .dashboard-hero h1{font-size:clamp(1.5rem,2.5vw,2.1rem);font-weight:800;margin:0}
+.rc11-admin .dashboard-hero p{color:#d6e3f1;margin:.4rem 0 0}
+.rc11-admin .metric-card{height:100%;border-radius:.9rem;border:1px solid #dbe4eb;background:#fff;padding:1.1rem 1.25rem}
+.rc11-admin .metric-label{color:#4d6074;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.045em}
+.rc11-admin .metric-value{color:#12233d;font-size:clamp(1.55rem,2.8vw,2.15rem);font-weight:800;line-height:1.3}
+.rc11-admin .dashboard-section{border-radius:1rem;overflow:hidden}
+.rc11-admin .dashboard-section h3{font-size:1.2rem;font-weight:750;color:#12233d}
+.rc11-admin .dashboard-nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:.65rem}
+.rc11-admin .dashboard-nav a{min-height:3rem;display:flex;align-items:center;justify-content:center;text-align:center;font-weight:650}
+.rc11-admin .admin-election-title{color:#12233d!important;font-weight:850!important}
+.rc11-admin .dashboard-status{display:inline-flex;align-items:center;gap:.35rem;padding:.3rem .65rem;border-radius:2rem;font-weight:750;font-size:.83rem}
+.rc11-admin .dashboard-status.open{background:#d6f2e5;color:#075b3b}
+.rc11-admin .dashboard-status.closed{background:#e9edf1;color:#374151}
+.rc11-admin .dashboard-status::before{content:'';width:.5rem;height:.5rem;border-radius:50%;background:currentColor}
+.rc11-admin .dashboard-settings{background:#f8fafc;border:1px solid #e1e7ef;border-radius:.8rem;padding:1.1rem}
+.rc11-admin .dashboard-section .card-body{padding:1.4rem!important}
+@media(max-width:575px){.rc11-admin .dashboard-hero{padding:1.25rem}.rc11-admin .dashboard-section .card-body{padding:1rem!important}}
+@media(prefers-reduced-motion:reduce){.rc11-admin *, .rc10-spinner{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+</style>
+<div class="rc11-admin">
+  <header class="dashboard-hero d-flex justify-content-between align-items-center flex-wrap gap-3">
+    <div><div class="small fw-bold text-uppercase" style="letter-spacing:.1em;color:#b9d9f4">RC11 · Super Administrator</div><h1>Election Administration</h1><p>Manage elections, voter records and security controls from one dashboard.</p></div>
+    <span class="dashboard-status {{ 'open' if election_open else 'closed' }}" aria-label="Voting status">Voting {{ 'OPEN' if election_open else 'CLOSED' }}</span>
+  </header>
+  <section aria-label="Election overview" class="row g-3 mb-4">
+    <div class="col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">Registered voters</div><div class="metric-value">{{ '{:,}'.format(registered_voters) }}</div><div class="small text-muted">Registered voter accounts</div></div></div>
+    <div class="col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">Recorded ballots</div><div class="metric-value">{{ '{:,}'.format(total_votes) }}</div><div class="small text-muted">Current election only</div></div></div>
+    <div class="col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">Active contests</div><div class="metric-value">{{ active_contests }}</div><div class="small text-muted">Current election only</div></div></div>
+    <div class="col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">Voting status</div><div class="metric-value">{{ 'OPEN' if election_open else 'CLOSED' }}</div><div class="small text-muted">Based on current schedule and settings</div></div></div>
+  </section>
 <div class="row g-4">
   <div class="col-lg-7">
-    <div class="card">
+    <div class="card dashboard-section">
       <div class="card-body p-4">
-        <h3>Administrator Dashboard</h3>
-        <p class="text-muted">Election lifecycle and security controls.</p>
+        <h3>Current Election &amp; Settings</h3>
+        <p class="text-muted">Manage the current election without affecting completed ballots.</p>
         <div class="border-start border-4 border-primary rounded bg-light p-3 mb-4" style="overflow-wrap:anywhere">
           <div class="small text-uppercase text-muted fw-bold">Current Election</div>
           <h2 class="admin-election-title mt-1 mb-2">{{ election.title }}</h2>
           <span class="badge text-bg-primary">{{ 'General Election' if election.election_type == 'general' else 'By-Election' }}</span>
           {% if election.election_date %}<span class="ms-2 text-muted">{{ election.election_date.strftime('%d %B %Y') }}</span>{% endif %}
         </div>
-        <div class="d-flex gap-2 flex-wrap mb-3">
+        <h3 class="mt-4 mb-3">Quick Access</h3>
+        <nav class="dashboard-nav mb-4" aria-label="Administrator tools">
+          <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_voters') }}">Manage Voters</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_candidates') }}">Manage Candidates</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_regions') }}">Manage Counties</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_geography') }}">Constituencies & Wards</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_elections') }}">Manage Elections</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_contests') }}">Election Contests</a>
           <form method="POST" action="{{ url_for('reload_kenya_geography') }}" class="d-inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-outline-success btn-sm">Verify / Load Kenya Geography</button></form>
-        </div>
-        <form method="POST">
+        </nav>
+        <form method="POST" class="dashboard-settings">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <div class="mb-3">
             <label class="form-label fw-bold" for="adminElectionTitle">Current election title</label>
@@ -1521,18 +1768,21 @@ ADMIN_HTML = """
     </div>
   </div>
   <div class="col-lg-5">
-    <div class="card">
+    <div class="card dashboard-section">
       <div class="card-body p-4">
-        <h4>System Summary</h4>
-        <p class="mb-1">Registered voters: <strong>{{ registered_voters }}</strong></p>
-        <p class="mb-1">Votes recorded: <strong>{{ total_votes }}</strong></p>
-        <p class="mb-0">Current status: <strong>{{ 'OPEN' if election_open else 'CLOSED' }}</strong></p>
+        <h3>Election at a Glance</h3>
+        <p class="text-muted">The figures above reflect the current election. Recorded ballots count submissions across contests, not necessarily distinct voters.</p>
+        <hr>
+        <div class="d-flex justify-content-between gap-2 mb-3"><span>Election type</span><strong>{{ 'General Election' if election.election_type == 'general' else 'By-Election' }}</strong></div>
+        <div class="d-flex justify-content-between gap-2 mb-3"><span>Results publication</span><strong>{{ 'Enabled' if election.results_visible else 'Hidden' }}</strong></div>
+        <div class="d-flex justify-content-between gap-2 mb-3"><span>Voting availability</span><strong>{{ 'Open' if election_open else 'Closed' }}</strong></div>
+        <div class="alert alert-secondary small mb-0">Security controls and ballot records remain unchanged by this interface redesign.</div>
       </div>
     </div>
   </div>
 </div>
 
-<div class="card mt-4">
+<div class="card dashboard-section mt-4">
   <div class="card-body p-4">
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
       <h4 class="mb-0">Recent Security Audit Events</h4>
@@ -1556,6 +1806,7 @@ ADMIN_HTML = """
       </table>
     </div>
   </div>
+</div>
 </div>
 {% endblock %}
 """
@@ -1594,7 +1845,13 @@ CANDIDATE_CONFIRMATION_HTML = """
   <div class="d-flex flex-wrap gap-2 mt-4">
    <a class="btn btn-primary" href="{{ url_for('manage_candidates') }}">Add Another Candidate</a>
    <a class="btn btn-outline-primary" href="{{ url_for('manage_candidates') }}">View / Manage Candidates</a>
-   <a class="btn btn-outline-secondary" href="{{ url_for('admin_dashboard') }}">Return to Admin Dashboard</a>
+  
+{% if current_user() and current_user().role == 'general_admin' %}
+   <a class="btn btn-outline-secondary" href="{{ url_for('general_admin_dashboard') }}">Return to General Admin Dashboard</a>
+{% elif current_user() and current_user().role in ('super_admin', 'admin') %}
+   <a class="btn btn-outline-secondary" href="{{ url_for('admin_dashboard') }}">Return to Super Admin Dashboard</a>
+{% endif %}
+
   </div>
  </div></div>
 </div></div>
@@ -1606,16 +1863,27 @@ CANDIDATES_HTML = """
 {% block content %}
 <style>
  .candidate-filter label,.candidate-form label{font-weight:600;color:#183a61}
- .candidate-filter .form-select,.candidate-form .form-control{background:#f5f9fd}
+ .candidate-filter .form-select,.candidate-form .form-control{background:#fff;border:1px solid #d9e2eb;min-height:42px}
+ .candidate-filter .form-select:focus,.candidate-form .form-control:focus{border-color:#0c8a5f;box-shadow:0 0 0 .2rem rgba(12,138,95,.12)}
  .candidate-card{border:1px solid #dfe7ef;border-radius:12px;padding:14px;margin-bottom:12px}
  .candidate-photo{width:76px;height:76px;object-fit:cover;border-radius:10px;background:#eef3f8}
  .party-symbol{width:52px;height:52px;object-fit:contain;border-radius:8px;background:white;border:1px solid #e2e8f0;padding:3px}
  .preview-img{width:92px;height:92px;object-fit:cover;border-radius:10px;border:1px solid #dbe3eb;background:white}
- .contest-banner{background:#edf6ff;border-left:4px solid #0d6efd;padding:12px 14px;border-radius:8px}
+ .contest-banner{background:#f4f8f6;border:1px solid #d6e8df;border-left:4px solid #0c8a5f;color:#173e32;padding:12px 14px;border-radius:8px}
+ .candidate-hero{background:linear-gradient(110deg,#12233d,#254b70);border-radius:15px;color:white;padding:26px 28px;margin-bottom:18px}
+ .candidate-hero .eyebrow{color:#acd7fa;font-size:.78rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
+ .candidate-hero h1{font-size:clamp(1.55rem,2.5vw,2.1rem);font-weight:800;margin:.35rem 0}
+ .candidate-subtle-note{color:#516477;font-size:.88rem;margin-top:12px}
+ .candidate-filter label{font-size:.9rem}
+ .candidate-card{background:#fff}
+ .candidate-page .card{border-color:#e2e8ef;border-radius:12px}
+ .candidate-page h3{font-size:1.35rem;font-weight:700;color:#12233d}
 </style>
+<div class="candidate-page">
+<div class="candidate-hero"><div class="eyebrow">RC11 · Election administration</div><h1>{{ "Candidate Management" if can_manage_candidates else "Candidate Directory" }}</h1><div>{{ election.title }} · {{ "Manage registered candidate profiles" if can_manage_candidates else "Browse registered candidates — read-only access" }}</div></div>
 <div class="row g-4">
- <div class="col-lg-5"><div class="card"><div class="card-body p-4">
-  <h3>Candidate Registration</h3>
+ <div class="{{ 'col-lg-5' if can_manage_candidates else 'col-12' }}"><div class="card"><div class="card-body p-4">
+  <h3>{{ 'Candidate Registration' if can_manage_candidates else 'Select Election Contest' }}</h3><p class="text-muted small mb-3">Choose an electoral position and its applicable area to display the relevant candidates.</p>
   <div class="alert alert-light border small mb-3"><strong>Election:</strong> {{ election.title }}</div>
   <div class="candidate-filter">
    <div class="mb-3"><label class="form-label">Position</label><select id="position" class="form-select"></select></div>
@@ -1624,6 +1892,7 @@ CANDIDATES_HTML = """
    <div class="mb-3" id="wardWrap"><label class="form-label">Ward</label><select id="ward" class="form-select"></select></div>
    <div class="contest-banner small mb-3" id="selectedArea">Select a position and electoral area.</div>
   </div>
+  {% if can_manage_candidates %}
   <form method="POST" enctype="multipart/form-data" class="candidate-form" id="candidateForm">
    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="add"><input type="hidden" name="contest_id" id="contest_id">
    <div class="mb-3"><label class="form-label">Full name</label><input class="form-control" name="name" required></div>
@@ -1636,14 +1905,19 @@ CANDIDATES_HTML = """
    <div class="my-3"><label class="form-label">Short manifesto/profile</label><textarea class="form-control" name="manifesto" rows="4"></textarea></div>
    <button class="btn btn-primary" id="addCandidate" disabled>Add Candidate</button>
   </form>
+  {% else %}
+  <p class="candidate-subtle-note mb-0">This directory is read-only. Select a contest to view candidate profiles.</p>
+  {% endif %}
  </div></div></div>
- <div class="col-lg-7"><div class="card"><div class="card-body p-4">
+ <div class="{{ 'col-lg-7' if can_manage_candidates else 'col-12' }}"><div class="card"><div class="card-body p-4">
   <div class="d-flex justify-content-between gap-3 flex-wrap"><div><h3>Registered Candidates</h3><h6 class="text-muted mb-3" id="candidateHeading">Select a contest</h6></div><div style="min-width:220px"><input id="candidateSearch" class="form-control" placeholder="Search candidates..."></div></div>
   <div id="candidateRows"><div class="text-muted">Choose a position and area to view candidates for that contest.</div></div>
-  <div class="alert alert-info small mt-3">Candidates are withdrawn rather than deleted, preserving ballot history. Editing changes profile details only; the candidate remains attached to the same contest.</div>
+  {% if can_manage_candidates %}<p class="candidate-subtle-note mb-0 mt-3">Withdrawals preserve ballot history. Profile edits do not move candidates between contests.</p>{% else %}<p class="candidate-subtle-note mb-0 mt-3">Read-only directory. Candidate record changes are restricted to Super Administrators.</p>{% endif %}
  </div></div></div>
 </div>
+</div>
 
+{% if can_manage_candidates %}
 <div class="modal fade" id="editCandidateModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
 <form method="POST" enctype="multipart/form-data"><div class="modal-header"><h5 class="modal-title">Edit Candidate</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
 <div class="modal-body"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="edit"><input type="hidden" name="candidate_id" id="edit_id">
@@ -1654,8 +1928,10 @@ CANDIDATES_HTML = """
 <div class="row g-2 mt-1"><div class="col"><label class="form-label">Replace candidate photo</label><input class="form-control" type="file" name="candidate_photo" accept=".jpg,.jpeg,.png,.webp"></div><div class="col"><label class="form-label">Replace party symbol</label><input class="form-control" type="file" name="party_symbol" accept=".jpg,.jpeg,.png,.webp"></div></div>
 </div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary">Save Changes</button></div></form>
 </div></div></div>
+{% endif %}
 
 <script>
+const canManageCandidates={{ can_manage_candidates|tojson }};
 const contests={{ contest_data|tojson }}, counties={{ counties_data|tojson }}, constituencies={{ constituencies_data|tojson }}, wards={{ wards_data|tojson }}, candidateMap={{ candidate_data|tojson }}, csrf={{ csrf_token()|tojson }};
 const pos=document.getElementById('position'),county=document.getElementById('county'),con=document.getElementById('constituency'),ward=document.getElementById('ward');
 const cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),search=document.getElementById('candidateSearch');
@@ -1665,13 +1941,15 @@ function positions(){let seen=[];contests.forEach(c=>{if(!seen.includes(c.positi
 function refreshGeo(){let p=pos.value,needCounty=p&&p!='President',needCon=['Member of Parliament','Member of County Assembly'].includes(p),needWard=p=='Member of County Assembly';cw.style.display=needCounty?'':'none';xw.style.display=needCon?'':'none';ww.style.display=needWard?'':'none';opts(county,counties,'Select County...');opts(con,[],'Select Constituency...');opts(ward,[],'Select Ward...');chooseContest();}
 function refreshCon(){opts(con,constituencies.filter(x=>String(x.county_id)==String(county.value)),'Select Constituency...');opts(ward,[],'Select Ward...');chooseContest();}
 function refreshWard(){opts(ward,wards.filter(x=>String(x.constituency_id)==String(con.value)),'Select Ward...');chooseContest();}
-function chooseContest(){let p=pos.value,c=null;if(p==='President')c=contests.find(x=>x.position===p);else if(p&&county.value)c=contests.find(x=>x.position===p&&String(x.county_id)===String(county.value)&&(!['Member of Parliament','Member of County Assembly'].includes(p)||String(x.constituency_id)===String(con.value))&&(p!=='Member of County Assembly'||String(x.ward_id)===String(ward.value)));currentContestId=c?String(c.id):'';document.getElementById('contest_id').value=currentContestId;document.getElementById('addCandidate').disabled=!c;document.getElementById('selectedArea').textContent=c?('Selected Contest: '+p+' — '+c.area):'Select the required position and electoral area.';document.getElementById('candidateHeading').textContent=c?('Candidates for: '+p+' — '+c.area):'Select a contest';currentRows=c?(candidateMap[currentContestId]||[]):[];renderRows();}
-function renderRows(){let q=search.value.trim().toLowerCase(),rows=currentRows.filter(r=>!q||[r.name,r.party,r.abbreviation,r.candidate_number].join(' ').toLowerCase().includes(q)),box=document.getElementById('candidateRows');if(!rows.length){box.innerHTML='<div class="text-muted">'+(currentRows.length?'No candidates match your search.':'No candidates registered for this contest yet.')+'</div>';return;}box.innerHTML=rows.map(r=>`<div class="candidate-card"><div class="d-flex gap-3 align-items-center">${r.photo_data?`<img class="candidate-photo" src="${r.photo_data}" alt="">`:`<div class="candidate-photo d-flex align-items-center justify-content-center text-muted">Photo</div>`}<div class="flex-grow-1"><div class="d-flex justify-content-between gap-2"><div><strong>${esc(r.name)}</strong>${r.candidate_number?` <span class="badge text-bg-light">No. ${esc(r.candidate_number)}</span>`:''}<div class="text-muted">${esc(r.party)} (${esc(r.abbreviation)})</div></div>${r.party_symbol_data?`<img class="party-symbol" src="${r.party_symbol_data}" alt="">`:''}</div><div class="mt-2"><span class="badge ${r.status==='active'?'text-bg-success':'text-bg-secondary'}">${esc(r.status.toUpperCase())}</span> <button type="button" class="btn btn-sm btn-outline-primary ms-1" onclick="openEditById(${r.id})">Edit</button><form method="POST" class="d-inline"><input type="hidden" name="csrf_token" value="${esc(csrf)}"><input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="${r.id}"><button class="btn btn-sm btn-outline-secondary ms-1">${r.status==='active'?'Withdraw':'Reactivate'}</button></form></div></div></div></div>`).join('');}
+function chooseContest(){let p=pos.value,c=null;if(p==='President')c=contests.find(x=>x.position===p);else if(p&&county.value)c=contests.find(x=>x.position===p&&String(x.county_id)===String(county.value)&&(!['Member of Parliament','Member of County Assembly'].includes(p)||String(x.constituency_id)===String(con.value))&&(p!=='Member of County Assembly'||String(x.ward_id)===String(ward.value)));currentContestId=c?String(c.id):'';if(canManageCandidates){document.getElementById('contest_id').value=currentContestId;document.getElementById('addCandidate').disabled=!c;}document.getElementById('selectedArea').textContent=c?('Selected Contest: '+p+' — '+c.area):'Select the required position and electoral area.';document.getElementById('candidateHeading').textContent=c?('Candidates for: '+p+' — '+c.area):'Select a contest';currentRows=c?(candidateMap[currentContestId]||[]):[];renderRows();}
+function renderRows(){let q=search.value.trim().toLowerCase(),rows=currentRows.filter(r=>!q||[r.name,r.party,r.abbreviation,r.candidate_number].join(' ').toLowerCase().includes(q)),box=document.getElementById('candidateRows');if(!rows.length){box.innerHTML='<div class="text-muted">'+(!currentContestId?'Select a position and electoral area above to view candidates.':currentRows.length?'No candidates match your search.':'No candidates registered for this contest yet.')+'</div>';return;}box.innerHTML=rows.map(r=>`<div class="candidate-card"><div class="d-flex gap-3 align-items-center">${r.photo_data?`<img class="candidate-photo" src="${r.photo_data}" alt="">`:`<div class="candidate-photo d-flex align-items-center justify-content-center text-muted">Photo</div>`}<div class="flex-grow-1"><div class="d-flex justify-content-between gap-2"><div><strong>${esc(r.name)}</strong>${r.candidate_number?` <span class="badge text-bg-light">No. ${esc(r.candidate_number)}</span>`:''}<div class="text-muted">${esc(r.party)} (${esc(r.abbreviation)})</div></div>${r.party_symbol_data?`<img class="party-symbol" src="${r.party_symbol_data}" alt="">`:''}</div><div class="mt-2"><span class="badge ${r.status==='active'?'text-bg-success':'text-bg-secondary'}">${esc(r.status.toUpperCase())}</span> ${canManageCandidates?`<button type="button" class="btn btn-sm btn-outline-primary ms-1" onclick="openEditById(${r.id})">Edit</button><form method="POST" class="d-inline"><input type="hidden" name="csrf_token" value="${esc(csrf)}"><input type="hidden" name="action" value="toggle"><input type="hidden" name="candidate_id" value="${r.id}"><button class="btn btn-sm btn-outline-secondary ms-1">${r.status==='active'?'Withdraw':'Reactivate'}</button></form>`:''}</div></div></div></div>`).join('');}
 function openEditById(id){let r=currentRows.find(x=>String(x.id)===String(id));if(!r)return;document.getElementById('edit_id').value=r.id;document.getElementById('edit_name').value=r.name||'';document.getElementById('edit_party').value=r.party||'';document.getElementById('edit_abbr').value=r.abbreviation||'';document.getElementById('edit_number').value=r.candidate_number||'';document.getElementById('edit_manifesto').value=r.manifesto||'';bootstrap.Modal.getOrCreateInstance(document.getElementById('editCandidateModal')).show();}
 function esc(v){return String(v??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));}
 function preview(input,img,wrap,removeBtn){let objectUrl=null;function clearSelection(){if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null;}input.value='';img.removeAttribute('src');wrap.classList.add('d-none');}input.addEventListener('change',()=>{if(objectUrl){URL.revokeObjectURL(objectUrl);objectUrl=null;}let f=input.files[0];if(!f){clearSelection();return;}objectUrl=URL.createObjectURL(f);img.src=objectUrl;wrap.classList.remove('d-none');});removeBtn.addEventListener('click',clearSelection);}
+if(canManageCandidates){
 preview(document.getElementById('candidate_photo'),document.getElementById('candidatePreview'),document.getElementById('candidatePreviewWrap'),document.getElementById('removeCandidatePhoto'));
 preview(document.getElementById('party_symbol'),document.getElementById('partyPreview'),document.getElementById('partyPreviewWrap'),document.getElementById('removePartySymbol'));
+}
 pos.addEventListener('change',refreshGeo);county.addEventListener('change',refreshCon);con.addEventListener('change',refreshWard);ward.addEventListener('change',chooseContest);search.addEventListener('input',renderRows);positions();refreshGeo();
 </script>
 {% endblock %}
@@ -1723,10 +2001,11 @@ const ac=document.getElementById('adminCounty'), ax=document.getElementById('adm
 </script>{% endblock %}"""
 
 CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}
+<div class="rc11-workspace">
 <style>
 .contest-stat{font-size:1.55rem;font-weight:700;color:#17375e}.filter-label{font-weight:600;color:#294866}.contest-table td,.contest-table th{vertical-align:middle}.readiness-row{display:flex;justify-content:space-between;gap:1rem;padding:.45rem 0;border-bottom:1px solid #edf0f3}.readiness-row:last-child{border-bottom:0}.scope-card{border-left:4px solid #0d6efd}.protected-note{background:#eef7ff;border:1px solid #cfe7fb;color:#315a78;border-radius:.5rem;padding:.7rem .85rem}
 </style>
-<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3"><div><h2 class="mb-1">Election Contests</h2><p class="text-muted mb-0">Browse and verify contests for the current election without scrolling through the full national list.</p></div><a class="btn btn-outline-secondary" href="{{url_for('manage_elections')}}">Election Management</a></div>
+<div class="rc11-page-header d-flex justify-content-between align-items-start flex-wrap gap-3"><div><h2>Election Contests</h2><p class="text-muted mb-0">Browse and verify contests for the current election without scrolling through the full national list.</p></div><a class="btn btn-outline-secondary" href="{{url_for('manage_elections')}}">Election Management</a></div>
 <form method="get" action="{{url_for('manage_contests')}}" class="card card-body mb-3"><label for="viewElection" class="filter-label form-label">View election contests (read-only selection)</label><select id="viewElection" name="election_id" class="form-select" onchange="rc10.election(this)">{% for item in all_elections %}<option value="{{item.id}}" {% if item.id==election.id %}selected{% endif %}>{{item.title}} — {{'CURRENT' if item.is_current else 'HISTORICAL'}}</option>{% endfor %}</select><div class="form-text">Selecting an election changes only this page's view; it does not change the current election.</div></form>
 <div class="card card-body mb-4 scope-card"><div class="row g-3 align-items-center"><div class="col-lg-7"><h4 class="mb-1">{{election.title}}</h4><div class="text-muted">{{'General Election' if election.election_type=='general' else 'By-Election'}}{% if election.election_date %} · {{election.election_date.strftime('%d %B %Y')}}{% endif %}</div></div><div class="col-lg-5 text-lg-end"><span class="badge text-bg-primary">{{total_contests}} CONTESTS</span> <span class="badge {{'text-bg-success' if election.is_open else 'text-bg-secondary'}}">VOTING {{'OPEN' if election.is_open else 'CLOSED'}}</span> <span class="badge {{'text-bg-success' if election.results_visible else 'text-bg-secondary'}}">RESULTS {{'RELEASED' if election.results_visible else 'NOT RELEASED'}}</span></div></div></div>
 <div class="row g-3 mb-4">
@@ -1744,24 +2023,34 @@ function filterMode(){const p=fp.value,n=p==='President',countyOnly=['Governor',
 function filterRows(){let n=0;document.querySelectorAll('#contestTable tbody tr').forEach(r=>{let ok=(!fp.value||r.dataset.position===fp.value)&&(!fc.value||r.dataset.county===fc.value)&&(!fx.value||r.dataset.con===fx.value)&&(!fw.value||r.dataset.ward===fw.value)&&(!q.value||r.innerText.toLowerCase().includes(q.value.toLowerCase()));r.style.display=ok?'':'none';if(ok)n++;});document.getElementById('visibleCount').textContent=n+' contest(s) shown.';}
 fp.addEventListener('change',filterMode);q.addEventListener('input',filterRows);fc.addEventListener('change',async()=>{fx.disabled=true;fw.disabled=true;fx.innerHTML='<option value="">All constituencies</option>';fw.innerHTML='<option value="">All wards</option>';if(fc.value){const rows=await rc10.geography('/api/constituencies/'+fc.value,'filterCon');fx.innerHTML='<option value="">All constituencies</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fx.disabled=rows.length===0;}filterRows();});fx.addEventListener('change',async()=>{fw.disabled=true;fw.innerHTML='<option value="">All wards</option>';if(fx.value){const rows=await rc10.geography('/api/wards/'+fx.value,'filterWard');fw.innerHTML='<option value="">All wards</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fw.disabled=rows.length===0;}filterRows();});fw.addEventListener('change',filterRows);filterMode();
 {% if election.election_type!='general' and election.id==current_election.id %}const pos=document.getElementById('position'),cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),county=document.getElementById('contestCounty'),con=document.getElementById('contestConstituency'),ward=document.getElementById('contestWard');function mode(){const p=pos.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';cw.style.display=(!p||n)?'none':'';xw.style.display=(!p||n||co)?'none':'';ww.style.display=(!p||n||co||mp)?'none':'';}pos.addEventListener('change',mode);mode();county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;ward.innerHTML='<option value="">Select constituency first</option>';if(!county.value)return;const rows=await rc10.geography('/api/constituencies/'+county.value,'contestConstituency');con.innerHTML='<option value="">Select constituency...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');con.disabled=rows.length===0;});con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value)return;const rows=await rc10.geography('/api/wards/'+con.value,'contestWard');ward.innerHTML='<option value="">Select ward...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=rows.length===0;});{% endif %}
-</script>{% endblock %}"""
+</script></div>{% endblock %}"""
 
 ELECTIONS_RC7 = """{% extends 'base.html' %}{% block content %}
+<div class="rc11-workspace">
 <style>.election-form .form-label{font-weight:600;color:#294866}.election-form .form-select,.election-form .form-control{font-weight:600;color:#263f5d;background:#f4f8fc;border-color:#cbd9e7}</style>
-<h2>Election Management</h2><p class="text-muted">Create either a five-year General Election or a vacancy By-Election. Each election keeps its own contests, ballots and results.</p>
-<div class="card card-body mb-4 election-form"><h4>Create Election</h4><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="create">
+<div class="rc11-page-header"><h2>Election Management</h2><p>Create a General Election or a vacancy By-Election. Each election maintains separate contests, ballots and results.</p></div>
+<div class="card card-body mb-4 election-form"><h4 class="rc11-subheading">Create Election</h4><form method="post" id="createElectionForm"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="create">
 <div class="row g-3"><div class="col-md-5"><label class="form-label">Election title</label><input class="form-control" name="title" required placeholder="e.g. Kenya General Election"></div><div class="col-md-3"><label class="form-label">Election type</label><select class="form-select" id="etype" name="election_type"><option value="general">General Election</option><option value="by_election">By-Election</option></select></div><div class="col-md-4"><label class="form-label">Election date</label><input class="form-control" type="date" name="election_date" required></div></div>
 <div class="mt-3"><label class="form-label">Voting Status</label><input class="form-control" type="text" value="CLOSED (default)" readonly><div class="form-text">Voting remains closed until an administrator opens it after election setup.</div></div>
 <div id="byFields" class="mt-3" style="display:none"><div class="alert alert-info py-2">A By-Election creates one vacant-seat contest only.</div><div class="row g-3"><div class="col-md-3"><label class="form-label">Position</label><select class="form-select" id="byPos" name="position">{% for p in by_positions %}<option>{{p}}</option>{% endfor %}</select></div><div class="col-md-3" id="byCountyWrap"><label class="form-label">County</label><select class="form-select" id="byCounty" name="county_id"><option value="">Select county</option>{% for c in counties %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></div><div class="col-md-3" id="byConWrap"><label class="form-label">Constituency</label><select class="form-select" id="byCon" name="constituency_id" disabled><option value="">Select county first</option></select></div><div class="col-md-3" id="byWardWrap"><label class="form-label">Ward</label><select class="form-select" id="byWard" name="ward_id" disabled><option value="">Select constituency first</option></select></div></div></div>
 <div class="form-check mt-3"><input class="form-check-input" type="checkbox" name="make_current" id="makeCurrent" checked><label class="form-check-label" for="makeCurrent">Make this the current election</label></div><button class="btn btn-primary mt-3">Create Election</button></form></div>
-<div class="card card-body"><h4>Election History</h4><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Election</th><th>Type</th><th>Date</th><th>Contests</th><th>Status</th><th></th></tr></thead><tbody>{% for e in elections %}<tr><td><strong>{{e.title}}</strong></td><td>{{'General Election' if e.election_type=='general' else 'By-Election'}}</td><td>{{e.election_date or '-'}}</td><td>{{contest_counts.get(e.id,0)}}</td><td>{% if e.is_current %}<span class="badge text-bg-success">CURRENT</span>{% else %}<span class="badge text-bg-secondary">HISTORICAL</span>{% endif %}</td><td>{% if not e.is_current %}<form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="select"><input type="hidden" name="election_id" value="{{e.id}}"><button class="btn btn-sm btn-outline-primary">Make Current</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>
+<div class="card card-body"><h4 class="rc11-subheading">Election History</h4><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Election</th><th>Type</th><th>Date</th><th>Contests</th><th>Status</th><th></th></tr></thead><tbody>{% for e in elections %}<tr><td><strong>{{e.title}}</strong></td><td>{{'General Election' if e.election_type=='general' else 'By-Election'}}</td><td>{{e.election_date or '-'}}</td><td>{{contest_counts.get(e.id,0)}}</td><td>{% if e.is_current %}<span class="badge text-bg-success">CURRENT</span>{% else %}<span class="badge text-bg-secondary">HISTORICAL</span>{% endif %}</td><td>{% if not e.is_current %}<form method="post" data-rc11-select-election data-rc11-select-election="{{e.title|e}}"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="select"><input type="hidden" name="election_id" value="{{e.id}}"><button class="btn btn-sm btn-outline-primary">Make Current</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>
 <script>
+document.getElementById('createElectionForm').addEventListener('submit',function(event){
+ if(!this.checkValidity())return;
+ const title=this.elements.title.value.trim(), kind=this.elements.election_type.value==='general'?'General Election':'By-Election';
+ const current=this.elements.make_current.checked?'\nThis will also change the current election.':'';
+ if(!window.confirm('Create '+kind+' \"'+title+'\"?\nVoting will initially be CLOSED.'+current))event.preventDefault();
+});
+document.querySelectorAll('form[data-rc11-select-election]').forEach(form=>form.addEventListener('submit',function(event){
+ if(!window.confirm('Make \"'+this.dataset.rc11SelectElection+'\" the current election?\nThis changes which election is active.'))event.preventDefault();
+}));
 const et=document.getElementById('etype'), bf=document.getElementById('byFields'), bp=document.getElementById('byPos'), bc=document.getElementById('byCounty'), bx=document.getElementById('byCon'), bw=document.getElementById('byWard'), bcw=document.getElementById('byCountyWrap'), bxw=document.getElementById('byConWrap'), bww=document.getElementById('byWardWrap');
 function typeMode(){bf.style.display=et.value==='by_election'?'':'none'}; et.addEventListener('change',typeMode);typeMode();
 function posMode(){const p=bp.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';bcw.style.display=n?'none':'';bxw.style.display=(n||co)?'none':'';bww.style.display=(n||co||mp)?'none':'';}bp.addEventListener('change',posMode);posMode();
 bc.addEventListener('change',async()=>{bx.disabled=true;bw.disabled=true;bw.innerHTML='<option value="">Select constituency first</option>';if(!bc.value)return;const r=await rc10.geography('/api/constituencies/'+bc.value,'byCon');bx.innerHTML='<option value="">Select constituency</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bx.disabled=r.length===0});
 bx.addEventListener('change',async()=>{bw.disabled=true;if(!bx.value)return;const r=await rc10.geography('/api/wards/'+bx.value,'byWard');bw.innerHTML='<option value="">Select ward</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bw.disabled=r.length===0});
-</script>{% endblock %}"""
+</script></div>{% endblock %}"""
 
 AUDIT_LOG_HTML = """
 {% extends "base.html" %}{% block content %}
@@ -1776,29 +2065,38 @@ VOTER_DASHBOARD_HTML = """
 {% extends "base.html" %}
 {% block title %}Voter Dashboard — Kenya Secure E-Voting{% endblock %}
 {% block content %}
-<div class="row justify-content-center">
+<style>
+ .voter-hero{background:linear-gradient(110deg,#12233d,#254b70);color:#fff;border-radius:15px;padding:26px 28px;margin-bottom:18px}
+ .voter-hero .eyebrow{font-size:.77rem;letter-spacing:.09em;text-transform:uppercase;color:#acd7fa;font-weight:700}
+ .voter-hero h2{font-size:clamp(1.5rem,2.8vw,2.15rem);font-weight:800;margin:.3rem 0}
+ .voter-dashboard .card{border-color:#e2e8ef;border-radius:12px}
+ .voter-area-value{font-weight:600;color:#12233d}
+ .voter-stat{font-weight:800;color:#12233d}
+</style>
+<div class="voter-dashboard"><div class="row justify-content-center">
   <div class="col-lg-9">
-    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-      <div><h2 class="mb-1">Welcome, {{ user.full_name }}</h2>
-      <p class="text-muted mb-0">{{ election.title }}</p></div>
+    <div class="voter-hero d-flex flex-wrap justify-content-between align-items-center gap-2">
+      <div><div class="eyebrow">RC11 · Voter dashboard</div><h2>Welcome, {{ user.full_name }}</h2>
+      <p class="mb-0">{{ election.title }}</p></div>
       <span class="badge {{ 'text-bg-success' if voting_open else 'text-bg-secondary' }} fs-6">
         Voting {{ 'OPEN' if voting_open else 'CLOSED' }}</span>
     </div>
     <div class="card mb-3"><div class="card-body">
-      <h5>Your Electoral Area</h5>
+      <h5 class="fw-bold">Your Electoral Area</h5>
+      {% if has_national_contest %}<div class="rounded-3 border p-3 mb-3" style="background:#f4f8f6;border-color:#d6e8df!important"><span class="small text-muted d-block">National election eligibility</span><strong class="voter-area-value">Nationwide — Kenya</strong><div class="small text-muted mt-1">National contests do not require a county, constituency or ward assignment.</div></div>{% endif %}
       <div class="row g-2">
-        <div class="col-md-4"><strong>County</strong><br>{{ area.county }}</div>
-        <div class="col-md-4"><strong>Constituency</strong><br>{{ area.constituency }}</div>
-        <div class="col-md-4"><strong>Ward</strong><br>{{ area.ward }}</div>
+        <div class="col-md-4"><strong>County</strong><br><span class="voter-area-value">{{ area.county }}</span></div>
+        <div class="col-md-4"><strong>Constituency</strong><br><span class="voter-area-value">{{ area.constituency }}</span></div>
+        <div class="col-md-4"><strong>Ward</strong><br><span class="voter-area-value">{{ area.ward }}</span></div>
       </div>
     </div></div>
     <div class="row g-3 mb-3">
       <div class="col-sm-6"><div class="card"><div class="card-body">
-        <div class="text-muted">Eligible contests</div><div class="display-6">{{ eligible_count }}</div>
+        <div class="text-muted">Eligible contests</div><div class="display-6 voter-stat">{{ eligible_count }}</div>
       </div></div></div>
       <div class="col-sm-6"><div class="card"><div class="card-body">
         <div class="text-muted">Ballots submitted</div>
-        <div class="display-6">{{ completed_count }} / {{ eligible_count }}</div>
+        <div class="display-6 voter-stat">{{ completed_count }} / {{ eligible_count }}</div>
       </div></div></div>
     </div>
     <div class="card"><div class="card-body">
@@ -1840,7 +2138,84 @@ VOTER_DASHBOARD_HTML = """
       <div class="mt-3"><a href="{{ url_for('results') }}">View Election Audit &amp; Results</a></div>
     </div></div>
   </div>
+</div></div>
+{% endblock %}
+"""
+
+VOTERS_HTML = """
+{% extends "base.html" %}
+{% block title %}Voter Management — RC11{% endblock %}
+{% block content %}
+<style>
+.vm-hero{background:linear-gradient(115deg,#12233d,#23466a);color:white;border-radius:14px;padding:24px;margin-bottom:18px}
+.vm-hero h1{font-size:clamp(1.5rem,3vw,2rem);font-weight:800}
+.vm-stat{border:1px solid #dce5ed;border-radius:12px;background:#fff;padding:16px;height:100%}
+.vm-stat .number{font-size:1.8rem;font-weight:800;color:#12233d}
+.vm-stat .label{font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:#50637a}
+.vm-filters{border:1px solid #dce5ed;border-radius:12px;background:white;padding:16px}
+.vm-table th{white-space:nowrap;background:#f0f4f8;color:#12233d;font-size:.85rem}
+.vm-table td{vertical-align:middle}
+.vm-area{max-width:260px;min-width:180px;white-space:normal;font-size:.88rem}
+.vm-email{overflow-wrap:anywhere;max-width:260px}
+.vm-table tbody tr:hover{background:#f6faff}
+.vm-count{font-weight:700;font-variant-numeric:tabular-nums}
+@media(max-width:767px){.vm-hero{padding:18px}.vm-table{font-size:.9rem}}
+</style>
+<section class="vm-hero">
+  <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+    <div><div class="small text-uppercase fw-semibold" style="letter-spacing:.1em;color:#b9d7f2">RC11 · Election Administration</div>
+      <h1 class="mb-1">Voter Management</h1>
+      <p class="mb-0" style="color:#dce9f5">Registration, eligibility and participation records — never candidate selections.</p></div>
+    <a class="btn btn-outline-light btn-sm" href="{{ url_for('admin_dashboard') if can_manage else url_for('general_admin_dashboard') }}">← Back to Dashboard</a>
+  </div>
+</section>
+<div class="row row-cols-2 row-cols-lg-4 g-3 mb-3">
+  <div class="col"><div class="vm-stat"><div class="label">Total voters</div><div class="number">{{ stats.total }}</div></div></div>
+  <div class="col"><div class="vm-stat"><div class="label">Email verified</div><div class="number">{{ stats.verified }}</div></div></div>
+  <div class="col"><div class="vm-stat"><div class="label">Email unverified</div><div class="number">{{ stats.unverified }}</div></div></div>
+  <div class="col"><div class="vm-stat"><div class="label">Suspended accounts</div><div class="number">{{ stats.suspended }}</div></div></div>
 </div>
+<div class="vm-filters mb-3">
+  <form method="GET" class="row g-3 align-items-end">
+    <div class="col-lg-5"><label for="vmSearch" class="form-label fw-semibold">Find a voter</label><input id="vmSearch" class="form-control" name="q" maxlength="150" value="{{ search }}" placeholder="Name or email"></div>
+    <div class="col-sm-6 col-lg-2"><label for="vmStatus" class="form-label fw-semibold">Account</label>
+      <select id="vmStatus" name="status" class="form-select"><option value="">All accounts</option><option value="enabled" {% if status_filter == 'enabled' %}selected{% endif %}>Enabled</option><option value="suspended" {% if status_filter == 'suspended' %}selected{% endif %}>Suspended</option></select></div>
+    <div class="col-sm-6 col-lg-2"><label for="vmVerified" class="form-label fw-semibold">Email</label>
+      <select id="vmVerified" name="verified" class="form-select"><option value="">All verification</option><option value="yes" {% if verified_filter == 'yes' %}selected{% endif %}>Verified</option><option value="no" {% if verified_filter == 'no' %}selected{% endif %}>Unverified</option></select></div>
+    <div class="col-lg-3 d-flex gap-2"><button class="btn btn-primary flex-grow-1" type="submit">Apply filters</button><a class="btn btn-outline-secondary" href="{{ url_for('manage_voters') }}">Reset</a></div>
+  </form>
+  <div class="d-flex gap-2 align-items-center flex-wrap mt-3">
+    <span class="badge text-bg-secondary">{{ total }} matching voters</span>
+    {% if not can_manage %}<span class="badge text-bg-info">Read-only administrator</span>{% endif %}
+    <span class="text-muted small">Summary cards cover all registered voter accounts; filters apply to the table below.</span>
+  </div>
+</div>
+<div class="table-responsive rounded-3 border bg-white">
+<table class="table table-striped vm-table mb-0">
+<thead><tr><th scope="col">ID</th><th scope="col">Voter</th><th scope="col">Email</th><th scope="col">Verification</th><th scope="col">Electoral area</th><th scope="col">Eligible contests</th><th scope="col">Ballot receipts</th><th scope="col">Account</th>{% if can_manage %}<th scope="col">Action</th>{% endif %}</tr></thead>
+<tbody>
+{% for row in rows %}
+<tr>
+<td class="text-muted">#{{ row.user.id }}</td><td class="fw-semibold">{{ row.user.full_name }}</td><td class="vm-email">{{ row.user.email }}</td>
+<td>{% if row.user.email_verified %}<span class="badge text-bg-success">Verified</span>{% else %}<span class="badge text-bg-warning">Unverified</span>{% endif %}</td>
+<td class="vm-area">{{ row.area }}</td><td class="vm-count">{{ row.eligible }}</td><td class="vm-count">{{ row.receipts }}</td>
+<td>{% if row.user.account_enabled %}<span class="badge text-bg-success">Enabled</span>{% else %}<span class="badge text-bg-danger">Suspended</span>{% endif %}</td>
+{% if can_manage %}<td>
+<form method="POST" action="{{ url_for('set_voter_account_status', user_id=row.user.id) }}" onsubmit="return confirm({{ ('Suspend this voter account? Login and authenticated access will be blocked. Existing ballots remain unchanged.' if row.user.account_enabled else 'Restore this voter account? Existing ballots remain unchanged.')|tojson }});">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="enabled" value="{{ '0' if row.user.account_enabled else '1' }}">
+<button type="submit" class="btn btn-sm {{ 'btn-outline-danger' if row.user.account_enabled else 'btn-outline-success' }}">{{ 'Suspend' if row.user.account_enabled else 'Restore' }}</button>
+</form></td>{% endif %}
+</tr>
+{% else %}<tr><td colspan="{{ 9 if can_manage else 8 }}" class="text-center text-muted py-4">No voters match these filters.</td></tr>{% endfor %}
+</tbody></table></div>
+<nav class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3" aria-label="Voter pages">
+ <span class="text-muted small">Page {{ page }} of {{ pages }}</span>
+ <div class="btn-group">
+ {% if page > 1 %}<a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_voters', q=search, status=status_filter, verified=verified_filter, page=page-1) }}">← Previous</a>{% endif %}
+ {% if page < pages %}<a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_voters', q=search, status=status_filter, verified=verified_filter, page=page+1) }}">Next →</a>{% endif %}
+ </div>
+</nav>
+<p class="small text-muted mt-3">Suspension does not delete accounts, receipts, encrypted ballots or audit records. Participation totals do not reveal individual candidate choices.</p>
 {% endblock %}
 """
 
@@ -1855,6 +2230,7 @@ app.jinja_loader = DictLoader({
     "vote.html": VOTE_HTML,
     "results.html": RESULTS_HTML,
     "admin.html": ADMIN_HTML,
+    "voters.html": VOTERS_HTML,
     "audit_log.html": AUDIT_LOG_HTML,
     "candidates.html": CANDIDATES_HTML,
     "candidate_confirmation.html": CANDIDATE_CONFIRMATION_HTML,
@@ -1883,8 +2259,10 @@ def voter_dashboard():
     if not user:
         session.clear()
         return redirect(url_for("login"))
-    if user.role == "admin":
-        return redirect(url_for("admin_dashboard"))
+    # RC11: Only registered voters may access the voter dashboard.
+    if user.role != ROLE_VOTER:
+        flash("Administrator accounts cannot access the voter dashboard.", "warning")
+        return redirect(url_for("home"))
     election = get_election()
     contests = eligible_contests_for(user)
     contest_ids = [contest.id for contest in contests]
@@ -1907,7 +2285,8 @@ def voter_dashboard():
         user=user, election=election, area=voter_area(user),
         contest_statuses=contest_statuses,
         voting_open=election_is_open(election),
-        eligible_count=len(contests), completed_count=completed_count
+        eligible_count=len(contests), completed_count=completed_count,
+        has_national_contest=any(c.scope_level == "national" for c in contests)
     )
 
 
@@ -1993,6 +2372,7 @@ def resend_verification():
     if request.method == "POST":
         validate_csrf()
         email = request.form.get("email", "").strip().lower()
+        _enforce_auth_limit("resend-verification", email, max_ip=12, max_identifier=3, window=3600)
         user = User.query.filter_by(email=email).first()
 
         if user and not user.email_verified:
@@ -2046,13 +2426,14 @@ def login():
     if request.method == "POST":
         validate_csrf()
         identifier = request.form.get("identifier", "").strip().lower()
+        _enforce_auth_limit("login", identifier)
         password = request.form.get("password", "")
 
         user = User.query.filter(
             (db.func.lower(User.email) == identifier) | (User.national_id == identifier)
         ).first()
 
-        if not user or not user.check_password(password):
+        if not user or not user.account_enabled or not user.check_password(password):
             flash("Invalid credentials.", "danger")
             return render_template_string(LOGIN_HTML)
 
@@ -2064,29 +2445,28 @@ def login():
             )
             return redirect(url_for("resend_verification"))
 
-        # ADMIN_EMAIL is authoritative for the staging/demo administrator.
-        # Promote on login too, so an account created after service startup gains
-        # admin access without requiring another restart.
-        if ADMIN_EMAIL and user.email.strip().lower() == ADMIN_EMAIL:
-            if user.role != "admin":
-                user.role = "admin"
-                db.session.commit()
-                log_event("ADMIN_ROLE_GRANTED", "INFO", user.id,
-                          "Administrator role granted from ADMIN_EMAIL during login.")
-
+        # RC11: Authentication must not change account privileges.
         session.clear()
         session["user_id"] = user.id
         session["user_name"] = user.full_name
-
         flash(f"Welcome, {user.full_name}.", "success")
-        if user.role == "admin":
+
+        # RC11: Redirect users according to their assigned role.
+        if user.role in (ROLE_SUPER_ADMIN, ROLE_LEGACY_ADMIN):
             return redirect(url_for("admin_dashboard"))
-        # V3 completion is per contest via BallotReceipt. The legacy global
-        # User.has_voted flag must not block a voter from remaining contests.
-        return redirect(url_for("voter_dashboard"))
+
+        if user.role == ROLE_GENERAL_ADMIN:
+            return redirect(url_for("general_admin_dashboard"))
+
+        if user.role == ROLE_VOTER:
+            return redirect(url_for("voter_dashboard"))
+
+        # Reject unrecognised roles rather than granting voter access.
+        session.clear()
+        flash("Your account role is not recognised. Contact an administrator.", "danger")
+        return redirect(url_for("login"))
 
     return render_template_string(LOGIN_HTML)
-
 
 @app.route("/logout")
 def logout():
@@ -2095,11 +2475,14 @@ def logout():
     return redirect(url_for("home"))
 
 
+
+
 @app.route("/forgot-password", methods=["GET", "POST"])
 def forgot_password():
     if request.method == "POST":
         validate_csrf()
         email = request.form.get("email", "").strip().lower()
+        _enforce_auth_limit("password-reset", email, max_ip=12, max_identifier=3, window=3600)
         user = User.query.filter_by(email=email).first()
 
         if user:
@@ -2184,7 +2567,23 @@ def reset_password(token):
 def vote():
     user = current_user()
     if not user:
-        session.clear(); return redirect(url_for("login"))
+        session.clear()
+        return redirect(url_for("login"))
+
+    # RC11: Only voter accounts may access or submit ballots.
+    if user.role != ROLE_VOTER:
+        log_event(
+            "ADMIN_VOTE_ACCESS_BLOCKED",
+            "WARNING",
+            user.id,
+            f"role={user.role}"
+        )
+        flash(
+            "Administrator accounts are not permitted to vote.",
+            "danger"
+        )
+        return redirect(url_for("home"))
+
     election = get_election()
     if not election_is_open(election):
         flash("Voting is closed. You can review your ballot submission status below.", "info"); return redirect(url_for("voter_dashboard"))
@@ -2210,6 +2609,27 @@ def vote():
             flash("Select at least one candidate in an uncast contest.", "warning"); return redirect(url_for("vote"))
 
         try:
+            # RC11: Serialize every ballot append across ALL elections on PostgreSQL.
+            # The advisory transaction lock is held until commit/rollback and
+            # prevents concurrent requests from reading the same chain tip.
+            if db.engine.dialect.name == "postgresql":
+                db.session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                                   {"lock_key": 746283119})
+            # Recheck receipts AFTER acquiring the lock, not only before it.
+            # Otherwise two concurrent submissions can both pass the initial check.
+            for contest, candidate in selected:
+                if BallotReceipt.query.filter_by(user_id=user.id, contest_id=contest.id).first():
+                    db.session.rollback()
+                    log_event("DUPLICATE_CONTEST_VOTE_BLOCKED", "WARNING", user.id,
+                              f"Concurrent submission for contest={contest.id}")
+                    flash("One of those contests has already been voted. No duplicate vote was recorded.", "warning")
+                    return redirect(url_for("vote"))
+            # Confirm voting has not been closed while this request waited.
+            db.session.refresh(election)
+            if not election_is_open(election):
+                db.session.rollback()
+                flash("Voting closed before your ballot was recorded.", "warning")
+                return redirect(url_for("voter_dashboard"))
             previous_hash = get_last_vote_hash()
             for contest, candidate in selected:
                 # The receipt proves participation in a contest but deliberately contains no candidate choice.
@@ -2288,15 +2708,39 @@ def candidate_confirmation(candidate_id, contest_id):
     election = ElectionSetting.query.get_or_404(contest.election_id)
     return render_template_string(CANDIDATE_CONFIRMATION_HTML,
         candidate=candidate, contest=contest, election=election, area=contest_area_name(contest))
-
 @app.route("/admin/candidates", methods=["GET", "POST"])
 @admin_required
 def manage_candidates():
     user = current_user()
     election = get_election()
+
     if request.method == "POST":
+        # Authorise on the server before processing any candidate change.
+        # Hiding UI controls alone does not prevent crafted POST requests.
+        if user.role not in {ROLE_SUPER_ADMIN, ROLE_LEGACY_ADMIN}:
+            log_event("UNAUTHORIZED_CANDIDATE_CHANGE", "WARNING", user.id,
+                      f"Blocked candidate modification attempt: {request.path}")
+            abort(403)
         validate_csrf()
         action = request.form.get("action")
+
+        # RC11: Protect candidate records during and after voting.
+        if action in {"add", "edit", "toggle"} and (
+            election.is_open
+            or Vote.query.filter_by(election_id=election.id).first() is not None
+        ):
+            log_event(
+                "CANDIDATE_CHANGE_BLOCKED",
+                "WARNING",
+                user.id,
+                f"Candidate modification blocked: election={election.id}, action={action}"
+            )
+            flash(
+                "Candidate records cannot be modified while voting is open or after votes have been recorded.",
+                "danger"
+            )
+            return redirect(url_for("manage_candidates"))
+
         if action == "add":
             name=request.form.get("name","").strip(); party=request.form.get("party","").strip(); abbr=request.form.get("abbreviation","").strip().upper(); cr=request.form.get("contest_id","")
             contest=Contest.query.filter_by(id=int(cr), election_id=election.id, active=True).first() if cr.isdigit() else None
@@ -2323,6 +2767,13 @@ def manage_candidates():
                 links=ContestCandidate.query.filter_by(candidate_id=c.id).all()
                 if not any(Contest.query.filter_by(id=l.contest_id,election_id=election.id).first() for l in links):
                     abort(403)
+                if any(
+                    (linked_contest := db.session.get(Contest, link.contest_id))
+                    and linked_contest.election_id != election.id
+                    for link in links
+                ):
+                    flash("This candidate is linked to another election and cannot be edited in place.", "danger")
+                    return redirect(url_for("manage_candidates"))
                 candidate_number=request.form.get("candidate_number","").strip()
                 if not candidate_number:
                     flash("Candidate number is required.","danger"); return redirect(url_for("manage_candidates"))
@@ -2341,10 +2792,57 @@ def manage_candidates():
                 if symbol: c.party_symbol_data=symbol
                 db.session.commit(); log_event("CANDIDATE_EDITED","WARNING",user.id,f"{c.id}: {c.name}")
                 flash("Candidate details updated.","success"); return redirect(url_for("manage_candidates"))
+       
+
         elif action == "toggle":
-            cid=request.form.get("candidate_id",""); c=Candidate.query.get(int(cid)) if cid.isdigit() else None
-            if c:
-                c.status="withdrawn" if c.status=="active" else "active"; db.session.commit(); log_event("CANDIDATE_STATUS_CHANGED","WARNING",user.id,f"{c.id}: {c.status}"); flash("Candidate status updated.","success"); return redirect(url_for("manage_candidates"))
+            cid = request.form.get("candidate_id", "")
+            c = Candidate.query.get(int(cid)) if cid.isdigit() else None
+
+            if not c:
+                abort(404)
+
+            # Verify that the candidate belongs to the current election.
+            belongs_to_election = (
+                db.session.query(ContestCandidate.id)
+                .join(Contest, Contest.id == ContestCandidate.contest_id)
+                .filter(
+                    ContestCandidate.candidate_id == c.id,
+                    Contest.election_id == election.id
+                )
+                .first()
+            )
+
+            if not belongs_to_election:
+                log_event(
+                    "UNAUTHORIZED_CANDIDATE_CHANGE",
+                    "WARNING",
+                    user.id,
+                    f"Candidate {c.id} does not belong to election {election.id}"
+                )
+                abort(403)
+
+            if any(
+                (linked_contest := db.session.get(Contest, link.contest_id))
+                and linked_contest.election_id != election.id
+                for link in ContestCandidate.query.filter_by(candidate_id=c.id).all()
+            ):
+                flash("This candidate is linked to another election and cannot be changed in place.", "danger")
+                return redirect(url_for("manage_candidates"))
+
+            c.status = "withdrawn" if c.status == "active" else "active"
+            db.session.commit()
+
+            log_event(
+                "CANDIDATE_STATUS_CHANGED",
+                "WARNING",
+                user.id,
+                f"{c.id}: {c.status}; election={election.id}"
+            )
+
+            flash("Candidate status updated.", "success")
+            return redirect(url_for("manage_candidates"))
+        else:
+            abort(400, description="Unsupported candidate action.")
     contests=Contest.query.filter_by(active=True,election_id=election.id).order_by(Contest.id).all()
     counties=Region.query.filter(Region.code!="LEGACY",Region.active==True).order_by(Region.name).all()
     cons=Constituency.query.filter_by(active=True).order_by(Constituency.name).all(); ws=Ward.query.filter_by(active=True).order_by(Ward.name).all()
@@ -2353,11 +2851,11 @@ def manage_candidates():
     for link in ContestCandidate.query.filter(ContestCandidate.contest_id.in_([c.id for c in contests])).all() if contests else []:
         cand=Candidate.query.get(link.candidate_id)
         if cand: candidate_data.setdefault(str(link.contest_id),[]).append({"id":cand.id,"name":cand.name,"party":cand.party,"abbreviation":cand.abbreviation,"candidate_number":cand.candidate_number,"manifesto":cand.manifesto,"photo_data":cand.photo_data,"party_symbol_data":cand.party_symbol_data,"status":cand.status})
-    return render_template_string(CANDIDATES_HTML,election=election,contest_data=contest_data,counties_data=[{"id":x.id,"name":x.name} for x in counties],constituencies_data=[{"id":x.id,"name":x.name,"county_id":x.county_id} for x in cons],wards_data=[{"id":x.id,"name":x.name,"constituency_id":x.constituency_id} for x in ws],candidate_data=candidate_data)
+    return render_template_string(CANDIDATES_HTML,election=election,contest_data=contest_data,counties_data=[{"id":x.id,"name":x.name} for x in counties],constituencies_data=[{"id":x.id,"name":x.name,"county_id":x.county_id} for x in cons],wards_data=[{"id":x.id,"name":x.name,"constituency_id":x.constituency_id} for x in ws],candidate_data=candidate_data,can_manage_candidates=user.role in {ROLE_SUPER_ADMIN, ROLE_LEGACY_ADMIN})
 
 
 @app.route("/admin/regions", methods=["GET", "POST"])
-@admin_required
+@super_admin_required
 def manage_regions():
     user = current_user()
     if request.method == "POST":
@@ -2405,7 +2903,7 @@ def contest_area_name(c):
     x=Ward.query.get(c.ward_id); return x.name if x else "Ward"
 
 @app.route("/admin/geography", methods=["GET","POST"])
-@admin_required
+@super_admin_required
 def manage_geography():
     if request.method=="POST":
         validate_csrf(); kind=request.form.get("kind"); name=request.form.get("name","").strip()
@@ -2434,7 +2932,7 @@ def _build_general_election_contests(election_id):
     return created
 
 @app.route("/admin/elections", methods=["GET","POST"])
-@admin_required
+@super_admin_required
 def manage_elections():
     user=current_user()
     if request.method=="POST":
@@ -2471,7 +2969,7 @@ def manage_elections():
     return render_template_string(ELECTIONS_RC7,elections=elections,contest_counts=counts,counties=Region.query.filter(Region.code!="LEGACY").order_by(Region.name).all(),by_positions=POSITIONS)
 
 @app.route("/admin/contests", methods=["GET","POST"])
-@admin_required
+@super_admin_required
 def manage_contests():
     current_election=get_election()
     election=current_election
@@ -2489,6 +2987,22 @@ def manage_contests():
         validate_csrf()
         # POST always targets the current election; GET selection is view-only.
         election=current_election
+              # RC11: Protect elections once voting has opened or votes exist.
+        if election.is_open or Vote.query.filter_by(
+            election_id=election.id
+        ).first() is not None:
+            log_event(
+                "CONTEST_CHANGE_BLOCKED",
+                "WARNING",
+                current_user().id,
+                f"election={election.id}"
+            )
+            flash(
+                "Contest changes are not permitted once voting has "
+                "opened or votes have been recorded.",
+                "danger"
+            )
+            return redirect(url_for("manage_contests"))
         if election.election_type=="general":
             flash("General Election contests are protected and generated automatically from verified electoral geography.","warning")
             return redirect(url_for("manage_contests"))
@@ -2527,15 +3041,30 @@ def manage_contests():
 
 @app.route("/results")
 def results():
-    election=get_election(); user=current_user(); is_admin=bool(user and user.role=="admin")
-    votes=Vote.query.filter_by(election_id=election.id).order_by(Vote.id.asc()).all(); previous_hash=GENESIS_HASH
+    election = get_election()
+    user = current_user()
+    is_admin = bool(user and user.role in ADMIN_ROLES)
+    # Never prepare candidate tallies for unauthorised viewers of unreleased results.
+    # Public users may still see the existing high-level integrity summary.
+    # The template never emits candidate data until results are released.
+    # The hash chain is GLOBAL across elections. Verify every ledger entry in
+    # insertion order, but decrypt and count ballots for the selected election only.
+    # This avoids false failures when votes from multiple elections interleave.
+    all_votes = Vote.query.order_by(Vote.id.asc()).all()
+    votes = [v for v in all_votes if v.election_id == election.id]
+    previous_hash = GENESIS_HASH
     integrity_status="VALID"; verified_count=0; invalid_ballots=0; break_point=None
     contest_tallies={}; legacy_tally={}; verified_contest_ballots={}
-    for v in votes:
+    for v in all_votes:
         expected=compute_chain_hash(v.encrypted_vote, previous_hash)
         if v.previous_hash != previous_hash or v.current_hash != expected:
-            integrity_status="HASH_FAILURE"; break_point=v.id; invalid_ballots=len(votes)-verified_count
-            log_event("HASH_CHAIN_FAILURE","CRITICAL",None,f"Ledger mismatch at vote ID {v.id}"); break
+            integrity_status="HASH_FAILURE"; break_point=v.id
+            invalid_ballots=len(votes)-verified_count
+            log_event("HASH_CHAIN_FAILURE","CRITICAL",None,f"Ledger mismatch at vote ID {v.id}")
+            break
+        previous_hash=v.current_hash
+        if v.election_id != election.id:
+            continue
         try:
             data=json.loads(fernet.decrypt(v.encrypted_vote.encode()).decode())
             cid=data.get("candidate_id"); contest_id=data.get("contest_id") or getattr(v,"contest_id",None)
@@ -2546,9 +3075,11 @@ def results():
             else:
                 legacy_tally[cid]=legacy_tally.get(cid,0)+1
         except (InvalidToken,ValueError,json.JSONDecodeError):
-            integrity_status="DECRYPTION_FAILURE"; break_point=v.id; invalid_ballots=len(votes)-verified_count
-            log_event("BALLOT_DECRYPTION_FAILURE","ERROR",None,f"Vote ID {v.id}; key version={getattr(v,'key_version','unknown')}"); break
-        verified_count += 1; previous_hash=v.current_hash
+            integrity_status="DECRYPTION_FAILURE"; break_point=v.id
+            invalid_ballots=len(votes)-verified_count
+            log_event("BALLOT_DECRYPTION_FAILURE","ERROR",None,f"Vote ID {v.id}; key version={getattr(v,'key_version','unknown')}")
+            break
+        verified_count += 1
 
     contest_results=[]
     pie_colors=["#0c8a5f","#d9a441","#305f9e","#b3423a","#7954a3","#169ca7","#cc6b32","#687b8e"]
@@ -2597,14 +3128,14 @@ def results():
     result_local_areas=sorted({r["local_area"] for r in contest_results if r["local_area"]})
     legacy_candidates={c.id:c for c in Candidate.query.filter(Candidate.id.in_(list(legacy_tally.keys()) or [-1])).all()}
     return render_template_string(RESULTS_HTML, election=election,election_open=election_is_open(election),is_admin=is_admin,
-        show_candidate_results=((not election_is_open(election)) and election.results_visible),total_votes=len(votes),verified_count=verified_count,
+        show_candidate_results=((not election_is_open(election)) and (is_admin or election.results_visible)),total_votes=len(votes),verified_count=verified_count,
         invalid_ballots=invalid_ballots,break_point=break_point,integrity_status=integrity_status,contest_results=contest_results,
         legacy_tally=legacy_tally,legacy_candidates=legacy_candidates,
         result_positions=result_positions,result_counties=result_counties,result_local_areas=result_local_areas)
 
 
 @app.route("/admin/audit/clear-view", methods=["POST"])
-@admin_required
+@super_admin_required
 def clear_audit_view():
     validate_csrf(); user=current_user(); latest=AuditEvent.query.order_by(AuditEvent.id.desc()).first()
     state=AuditViewState.query.filter_by(user_id=user.id).first()
@@ -2624,14 +3155,14 @@ def full_audit_log():
     return render_template_string(AUDIT_LOG_HTML,events=events,event_filter=event_filter,severity_filter=severity_filter)
 
 @app.route("/admin/geography/load", methods=["POST"])
-@admin_required
+@super_admin_required
 def reload_kenya_geography():
     validate_csrf(); user=current_user(); ok,message=seed_kenya_electoral_geography(force=True)
     log_event("KENYA_GEOGRAPHY_LOAD", "INFO" if ok else "ERROR", user.id, message)
     flash(message, "success" if ok else "danger"); return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin", methods=["GET", "POST"])
-@admin_required
+@super_admin_required
 def admin_dashboard():
     election = get_election()
     user = current_user()
@@ -2639,30 +3170,248 @@ def admin_dashboard():
     if request.method == "POST":
         validate_csrf()
         title = request.form.get("title", "").strip()[:200]
-        election.title = title or ELECTION_DEFAULT_TITLE
-        election.is_open = request.form.get("is_open") == "on"
-        election.results_visible = request.form.get("results_visible") == "on"
+        requested_open = request.form.get("is_open") == "on"
+
+        # RC11: Check whether this election contains recorded ballots.
+        has_votes = Vote.query.filter_by(
+            election_id=election.id
+        ).first() is not None
+
+        # RC11: An election is protected once manually closed
+        # or once its scheduled closing time has passed.
+        completed_with_votes = has_votes and (
+            not election.is_open
+            or (
+                election.closes_at is not None
+                and datetime.utcnow() >= election.closes_at
+            )
+        )
+
+        # Prevent reopening completed elections.
+        if requested_open and completed_with_votes:
+            log_event(
+                "ELECTION_REOPEN_BLOCKED",
+                "WARNING",
+                user.id,
+                f"election={election.id}"
+            )
+            flash(
+                "This election cannot be reopened because voting "
+                "has closed and recorded ballots must be protected.",
+                "danger"
+            )
+            return redirect(url_for("admin_dashboard"))
+
+        # Protect the identity of completed elections.
+        if completed_with_votes:
+            if title != election.title:
+                log_event(
+                    "ELECTION_RENAME_BLOCKED",
+                    "WARNING",
+                    user.id,
+                    f"election={election.id}"
+                )
+                flash(
+                    "The title of a completed election with recorded "
+                    "votes cannot be changed.",
+                    "danger"
+                )
+                return redirect(url_for("admin_dashboard"))
+
+            election.is_open = False
+        else:
+            election.title = title or ELECTION_DEFAULT_TITLE
+            election.is_open = requested_open
+
+        # Super Administrators may control result publication.
+        election.results_visible = (
+            request.form.get("results_visible") == "on"
+        )
         db.session.commit()
+
         log_event(
             "ELECTION_SETTINGS_CHANGED",
             "WARNING",
             user.id,
-            f"is_open={election.is_open}; results_visible={election.results_visible}"
+            f"is_open={election.is_open}; "
+            f"results_visible={election.results_visible}"
         )
         flash("Election settings updated.", "success")
         return redirect(url_for("admin_dashboard"))
 
-    state=AuditViewState.query.filter_by(user_id=user.id).first()
-    cleared_through=state.cleared_through_id if state else 0
-    events=AuditEvent.query.filter(AuditEvent.id > cleared_through).order_by(AuditEvent.id.desc()).limit(50).all()
+    state = AuditViewState.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    cleared_through = state.cleared_through_id if state else 0
+
+    events = AuditEvent.query.filter(
+        AuditEvent.id > cleared_through
+    ).order_by(
+        AuditEvent.id.desc()
+    ).limit(50).all()
+
     return render_template_string(
         ADMIN_HTML,
         election=election,
         election_open=election_is_open(election),
-        registered_voters=User.query.filter(User.role != "admin").count(),
-        total_votes=Vote.query.filter_by(election_id=election.id).count(),
+        registered_voters=User.query.filter(
+            User.role == ROLE_VOTER
+        ).count(),
+        total_votes=Vote.query.filter_by(
+            election_id=election.id
+        ).count(),
+        active_contests=Contest.query.filter_by(
+            election_id=election.id, active=True
+        ).count(),
         events=events,
     )
+
+
+# ----------------------------------------------------------------------------
+# RC11: General Administrator Dashboard
+# ----------------------------------------------------------------------------
+
+@app.route("/admin/voters", methods=["GET"])
+@admin_required
+def manage_voters():
+    user = current_user()
+    can_manage = user.role in (ROLE_SUPER_ADMIN, ROLE_LEGACY_ADMIN)
+    search = request.args.get("q", "").strip()[:150]
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except ValueError:
+        page = 1
+    status_filter = request.args.get("status", "")
+    verified_filter = request.args.get("verified", "")
+    if status_filter not in ("", "enabled", "suspended"):
+        status_filter = ""
+    if verified_filter not in ("", "yes", "no"):
+        verified_filter = ""
+    base_query = User.query.filter(User.role == ROLE_VOTER)
+    stats = {
+        "total": base_query.count(),
+        "verified": base_query.filter(User.email_verified.is_(True)).count(),
+        "unverified": base_query.filter(User.email_verified.is_(False)).count(),
+        "suspended": base_query.filter(User.account_enabled.is_(False)).count(),
+    }
+    query = base_query
+    if status_filter:
+        query = query.filter(User.account_enabled.is_(status_filter == "enabled"))
+    if verified_filter:
+        query = query.filter(User.email_verified.is_(verified_filter == "yes"))
+    if search:
+        term = "%" + search + "%"
+        query = query.filter(db.or_(User.full_name.ilike(term), User.email.ilike(term)))
+    total = query.count()
+    pages = max(1, (total + 24) // 25)
+    page = min(page, pages)
+    voters = query.order_by(User.id).offset((page - 1) * 25).limit(25).all()
+    election = get_election()
+    contests = Contest.query.filter_by(election_id=election.id, active=True).all()
+    ids = [v.id for v in voters]
+    counts = {}
+    if ids:
+        counts = dict(db.session.query(BallotReceipt.user_id, db.func.count(BallotReceipt.id))
+                      .join(Contest, Contest.id == BallotReceipt.contest_id)
+                      .filter(BallotReceipt.user_id.in_(ids), Contest.election_id == election.id)
+                      .group_by(BallotReceipt.user_id).all())
+    rows = []
+    for v in voters:
+        eligible = sum(1 for c in contests if (
+            c.scope_level == "national" or
+            (c.scope_level == "county" and v.region_id and c.county_id == v.region_id) or
+            (c.scope_level == "constituency" and v.constituency_id and c.constituency_id == v.constituency_id) or
+            (c.scope_level == "ward" and v.ward_id and c.ward_id == v.ward_id)))
+        area = voter_area(v)
+        rows.append(dict(user=v, eligible=eligible, receipts=counts.get(v.id, 0),
+                         area=" / ".join((area["county"], area["constituency"], area["ward"]))))
+    return render_template_string(VOTERS_HTML, rows=rows, total=total, pages=pages,
+                                  page=page, search=search, can_manage=can_manage, stats=stats,
+                                  status_filter=status_filter, verified_filter=verified_filter)
+
+
+@app.route("/admin/voters/<int:user_id>/status", methods=["POST"])
+@super_admin_required
+def set_voter_account_status(user_id):
+    validate_csrf()
+    voter = db.session.get(User, user_id)
+    enabled = request.form.get("enabled")
+    if not voter or voter.role != ROLE_VOTER or enabled not in ("0", "1"):
+        abort(400, description="Invalid voter account status request.")
+    new_value = enabled == "1"
+    if voter.account_enabled != new_value:
+        voter.account_enabled = new_value
+        db.session.add(AuditEvent(event_type="VOTER_ACCOUNT_STATUS_CHANGED", severity="WARNING",
+                                  user_id=current_user().id,
+                                  details=f"voter_id={voter.id}; enabled={new_value}"))
+        db.session.commit()
+    flash("Voter account status updated. Existing ballots and receipts were preserved.", "success")
+    return redirect(url_for("manage_voters"))
+
+
+@app.route("/admin/general", methods=["GET"])
+@admin_required
+def general_admin_dashboard():
+    election = get_election()
+    user = current_user()
+
+    # This dashboard is read-only.
+    # General Administrators cannot change election settings here.
+
+    registered_voters = User.query.filter(
+        User.role == ROLE_VOTER
+    ).count()
+
+    total_votes = Vote.query.filter_by(
+        election_id=election.id
+    ).count()
+
+    return render_template_string(
+        """
+        {% extends "base.html" %}
+        {% block title %}General Administrator Dashboard — RC11{% endblock %}
+        {% block content %}
+        <style>
+          .ga-hero{background:linear-gradient(110deg,#12233d,#23486c);color:white;border-radius:14px;padding:26px;margin-bottom:18px}
+          .ga-stat{background:#fff;border:1px solid #dce5ed;border-radius:12px;padding:18px;height:100%}
+          .ga-stat-label{font-size:.8rem;letter-spacing:.05em;text-transform:uppercase;color:#536780;font-weight:700}
+          .ga-stat-value{font-size:1.7rem;color:#12233d;font-weight:800}
+          .ga-action{border:1px solid #dce5ed;border-radius:10px;padding:18px;height:100%;background:#fff}
+        </style>
+        <section class="ga-hero">
+          <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <div><div class="text-uppercase small fw-semibold" style="color:#b9d7f2;letter-spacing:.08em">RC11 · Election Administration</div>
+              <h1 class="fw-bold mt-1 mb-1">General Administrator Dashboard</h1>
+              <p class="mb-0" style="color:#dce9f5">{{ election.title }}</p>
+            </div>
+            <span class="badge bg-light text-dark">Voting {{ 'OPEN' if election_open else 'CLOSED' }}</span>
+          </div>
+        </section>
+        <div class="row row-cols-1 row-cols-md-3 g-3 mb-4">
+          <div class="col"><div class="ga-stat"><div class="ga-stat-label">Election status</div><div class="ga-stat-value">{{ 'OPEN' if election_open else 'CLOSED' }}</div></div></div>
+          <div class="col"><div class="ga-stat"><div class="ga-stat-label">Registered voters</div><div class="ga-stat-value">{{ registered_voters }}</div></div></div>
+          <div class="col"><div class="ga-stat"><div class="ga-stat-label">Recorded ballots</div><div class="ga-stat-value">{{ total_votes }}</div></div></div>
+        </div>
+        <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+          <h2 class="h4 mb-0">Administration</h2>
+          <span class="badge text-bg-info">General Admin · Read-only</span>
+        </div>
+        <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3">
+          <div class="col"><div class="ga-action"><h3 class="h6 fw-bold">Voter records</h3><p class="text-muted small">View voter registration, verification and participation.</p><a class="btn btn-outline-primary" href="{{ url_for('manage_voters') }}">View Voters</a></div></div>
+          <div class="col"><div class="ga-action"><h3 class="h6 fw-bold">Candidates</h3><p class="text-muted small">Browse candidate information without editing.</p><a class="btn btn-outline-primary" href="{{ url_for('manage_candidates') }}">View Candidates</a></div></div>
+          <div class="col"><div class="ga-action"><h3 class="h6 fw-bold">Audit and results</h3><p class="text-muted small">Review authorised election results and security records.</p><div class="d-flex gap-2 flex-wrap"><a class="btn btn-outline-primary" href="{{ url_for('results') }}">Audit &amp; Results</a><a class="btn btn-outline-secondary" href="{{ url_for('full_audit_log') }}">Audit Log</a></div></div></div>
+        </div>
+        <p class="text-muted small mt-3">General Administrators cannot change election settings, suspend voters or publish results.</p>
+        {% endblock %}
+        """,
+        election=election,
+        election_open=election_is_open(election),
+        registered_voters=registered_voters,
+        total_votes=total_votes,
+        user=user,
+    )
+
 
 
 # ----------------------------------------------------------------------------
