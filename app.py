@@ -1179,6 +1179,33 @@ window.rc10 = (() => {
     .badge-valid { background: var(--emerald); }
     .badge-compromised { background: var(--clay); }
     footer { color: var(--ink-soft); font-size: .85rem; }
+
+/* RC11 professional administration theme: consistent with existing navy/emerald UI */
+.rc11-workspace .rc11-page-header{background:linear-gradient(115deg,#12233d,#234768);color:#fff;border-radius:14px;padding:1.65rem 1.8rem;margin-bottom:1.35rem;box-shadow:0 7px 22px rgba(18,35,61,.12)}
+.rc11-workspace .rc11-page-header h2{font-size:clamp(1.55rem,2.5vw,2rem);font-weight:800;letter-spacing:-.025em;margin:0 0 .35rem}
+.rc11-workspace .rc11-page-header p{color:#e1eaf3!important;margin:0;max-width:72ch}
+.rc11-workspace .rc11-page-header .btn{border-color:#b5cde0;color:#fff}
+.rc11-workspace .rc11-page-header .btn:hover{background:#fff;color:#12233d}
+.rc11-workspace .card{border:1px solid #dce4ed;border-radius:12px;box-shadow:0 4px 14px rgba(18,35,61,.055);overflow:visible}
+.rc11-workspace .card-body{padding:1.45rem}
+.rc11-workspace h4{color:#17375e;font-size:1.15rem;font-weight:750}
+.rc11-workspace .form-label{font-weight:650;color:#294866}
+.rc11-workspace .form-control,.rc11-workspace .form-select{border-color:#cbd7e4;border-radius:7px;min-height:42px}
+.rc11-workspace .form-control:focus,.rc11-workspace .form-select:focus{border-color:#0c8a5f;box-shadow:0 0 0 .2rem rgba(12,138,95,.13)}
+.rc11-workspace .btn-primary{background:#17375e;border-color:#17375e}
+.rc11-workspace .btn-primary:hover{background:#0d2849;border-color:#0d2849}
+.rc11-workspace .btn-outline-primary{color:#17375e;border-color:#6684a5}
+.rc11-workspace .btn-outline-primary:hover{background:#17375e;color:white}
+.rc11-workspace .table thead th{background:#eef3f8;color:#294866;font-size:.8rem;letter-spacing:.035em;text-transform:uppercase;padding:.85rem .75rem;border-bottom:2px solid #dce4ed}
+.rc11-workspace .table tbody td{padding:.8rem .75rem;border-color:#edf1f5}
+.rc11-workspace .table tbody tr:hover{background:#f5f9fc}
+.rc11-workspace .contest-stat{font-size:1.85rem;color:#17375e}
+.rc11-workspace .scope-card{border-left:5px solid #0c8a5f}
+.rc11-workspace .protected-note{border-radius:10px}
+.rc11-workspace .rc11-subheading{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem}
+.rc11-workspace .rc11-subheading:before{content:'';width:5px;height:22px;background:#0c8a5f;border-radius:3px}
+@media(max-width:575px){.rc11-workspace .rc11-page-header{padding:1.25rem}.rc11-workspace .card-body{padding:1rem}}
+
   </style>
 </head>
 <body>
@@ -1974,10 +2001,11 @@ const ac=document.getElementById('adminCounty'), ax=document.getElementById('adm
 </script>{% endblock %}"""
 
 CONTESTS_V3 = """{% extends 'base.html' %}{% block content %}
+<div class="rc11-workspace">
 <style>
 .contest-stat{font-size:1.55rem;font-weight:700;color:#17375e}.filter-label{font-weight:600;color:#294866}.contest-table td,.contest-table th{vertical-align:middle}.readiness-row{display:flex;justify-content:space-between;gap:1rem;padding:.45rem 0;border-bottom:1px solid #edf0f3}.readiness-row:last-child{border-bottom:0}.scope-card{border-left:4px solid #0d6efd}.protected-note{background:#eef7ff;border:1px solid #cfe7fb;color:#315a78;border-radius:.5rem;padding:.7rem .85rem}
 </style>
-<div class="d-flex justify-content-between align-items-start flex-wrap gap-3 mb-3"><div><h2 class="mb-1">Election Contests</h2><p class="text-muted mb-0">Browse and verify contests for the current election without scrolling through the full national list.</p></div><a class="btn btn-outline-secondary" href="{{url_for('manage_elections')}}">Election Management</a></div>
+<div class="rc11-page-header d-flex justify-content-between align-items-start flex-wrap gap-3"><div><h2>Election Contests</h2><p class="text-muted mb-0">Browse and verify contests for the current election without scrolling through the full national list.</p></div><a class="btn btn-outline-secondary" href="{{url_for('manage_elections')}}">Election Management</a></div>
 <form method="get" action="{{url_for('manage_contests')}}" class="card card-body mb-3"><label for="viewElection" class="filter-label form-label">View election contests (read-only selection)</label><select id="viewElection" name="election_id" class="form-select" onchange="rc10.election(this)">{% for item in all_elections %}<option value="{{item.id}}" {% if item.id==election.id %}selected{% endif %}>{{item.title}} — {{'CURRENT' if item.is_current else 'HISTORICAL'}}</option>{% endfor %}</select><div class="form-text">Selecting an election changes only this page's view; it does not change the current election.</div></form>
 <div class="card card-body mb-4 scope-card"><div class="row g-3 align-items-center"><div class="col-lg-7"><h4 class="mb-1">{{election.title}}</h4><div class="text-muted">{{'General Election' if election.election_type=='general' else 'By-Election'}}{% if election.election_date %} · {{election.election_date.strftime('%d %B %Y')}}{% endif %}</div></div><div class="col-lg-5 text-lg-end"><span class="badge text-bg-primary">{{total_contests}} CONTESTS</span> <span class="badge {{'text-bg-success' if election.is_open else 'text-bg-secondary'}}">VOTING {{'OPEN' if election.is_open else 'CLOSED'}}</span> <span class="badge {{'text-bg-success' if election.results_visible else 'text-bg-secondary'}}">RESULTS {{'RELEASED' if election.results_visible else 'NOT RELEASED'}}</span></div></div></div>
 <div class="row g-3 mb-4">
@@ -1995,24 +2023,34 @@ function filterMode(){const p=fp.value,n=p==='President',countyOnly=['Governor',
 function filterRows(){let n=0;document.querySelectorAll('#contestTable tbody tr').forEach(r=>{let ok=(!fp.value||r.dataset.position===fp.value)&&(!fc.value||r.dataset.county===fc.value)&&(!fx.value||r.dataset.con===fx.value)&&(!fw.value||r.dataset.ward===fw.value)&&(!q.value||r.innerText.toLowerCase().includes(q.value.toLowerCase()));r.style.display=ok?'':'none';if(ok)n++;});document.getElementById('visibleCount').textContent=n+' contest(s) shown.';}
 fp.addEventListener('change',filterMode);q.addEventListener('input',filterRows);fc.addEventListener('change',async()=>{fx.disabled=true;fw.disabled=true;fx.innerHTML='<option value="">All constituencies</option>';fw.innerHTML='<option value="">All wards</option>';if(fc.value){const rows=await rc10.geography('/api/constituencies/'+fc.value,'filterCon');fx.innerHTML='<option value="">All constituencies</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fx.disabled=rows.length===0;}filterRows();});fx.addEventListener('change',async()=>{fw.disabled=true;fw.innerHTML='<option value="">All wards</option>';if(fx.value){const rows=await rc10.geography('/api/wards/'+fx.value,'filterWard');fw.innerHTML='<option value="">All wards</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');fw.disabled=rows.length===0;}filterRows();});fw.addEventListener('change',filterRows);filterMode();
 {% if election.election_type!='general' and election.id==current_election.id %}const pos=document.getElementById('position'),cw=document.getElementById('countyWrap'),xw=document.getElementById('constituencyWrap'),ww=document.getElementById('wardWrap'),county=document.getElementById('contestCounty'),con=document.getElementById('contestConstituency'),ward=document.getElementById('contestWard');function mode(){const p=pos.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';cw.style.display=(!p||n)?'none':'';xw.style.display=(!p||n||co)?'none':'';ww.style.display=(!p||n||co||mp)?'none':'';}pos.addEventListener('change',mode);mode();county.addEventListener('change',async()=>{con.disabled=true;ward.disabled=true;ward.innerHTML='<option value="">Select constituency first</option>';if(!county.value)return;const rows=await rc10.geography('/api/constituencies/'+county.value,'contestConstituency');con.innerHTML='<option value="">Select constituency...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');con.disabled=rows.length===0;});con.addEventListener('change',async()=>{ward.disabled=true;if(!con.value)return;const rows=await rc10.geography('/api/wards/'+con.value,'contestWard');ward.innerHTML='<option value="">Select ward...</option>'+rows.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');ward.disabled=rows.length===0;});{% endif %}
-</script>{% endblock %}"""
+</script></div>{% endblock %}"""
 
 ELECTIONS_RC7 = """{% extends 'base.html' %}{% block content %}
+<div class="rc11-workspace">
 <style>.election-form .form-label{font-weight:600;color:#294866}.election-form .form-select,.election-form .form-control{font-weight:600;color:#263f5d;background:#f4f8fc;border-color:#cbd9e7}</style>
-<h2>Election Management</h2><p class="text-muted">Create either a five-year General Election or a vacancy By-Election. Each election keeps its own contests, ballots and results.</p>
-<div class="card card-body mb-4 election-form"><h4>Create Election</h4><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="create">
+<div class="rc11-page-header"><h2>Election Management</h2><p>Create a General Election or a vacancy By-Election. Each election maintains separate contests, ballots and results.</p></div>
+<div class="card card-body mb-4 election-form"><h4 class="rc11-subheading">Create Election</h4><form method="post" id="createElectionForm"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="create">
 <div class="row g-3"><div class="col-md-5"><label class="form-label">Election title</label><input class="form-control" name="title" required placeholder="e.g. Kenya General Election"></div><div class="col-md-3"><label class="form-label">Election type</label><select class="form-select" id="etype" name="election_type"><option value="general">General Election</option><option value="by_election">By-Election</option></select></div><div class="col-md-4"><label class="form-label">Election date</label><input class="form-control" type="date" name="election_date" required></div></div>
 <div class="mt-3"><label class="form-label">Voting Status</label><input class="form-control" type="text" value="CLOSED (default)" readonly><div class="form-text">Voting remains closed until an administrator opens it after election setup.</div></div>
 <div id="byFields" class="mt-3" style="display:none"><div class="alert alert-info py-2">A By-Election creates one vacant-seat contest only.</div><div class="row g-3"><div class="col-md-3"><label class="form-label">Position</label><select class="form-select" id="byPos" name="position">{% for p in by_positions %}<option>{{p}}</option>{% endfor %}</select></div><div class="col-md-3" id="byCountyWrap"><label class="form-label">County</label><select class="form-select" id="byCounty" name="county_id"><option value="">Select county</option>{% for c in counties %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></div><div class="col-md-3" id="byConWrap"><label class="form-label">Constituency</label><select class="form-select" id="byCon" name="constituency_id" disabled><option value="">Select county first</option></select></div><div class="col-md-3" id="byWardWrap"><label class="form-label">Ward</label><select class="form-select" id="byWard" name="ward_id" disabled><option value="">Select constituency first</option></select></div></div></div>
 <div class="form-check mt-3"><input class="form-check-input" type="checkbox" name="make_current" id="makeCurrent" checked><label class="form-check-label" for="makeCurrent">Make this the current election</label></div><button class="btn btn-primary mt-3">Create Election</button></form></div>
-<div class="card card-body"><h4>Election History</h4><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Election</th><th>Type</th><th>Date</th><th>Contests</th><th>Status</th><th></th></tr></thead><tbody>{% for e in elections %}<tr><td><strong>{{e.title}}</strong></td><td>{{'General Election' if e.election_type=='general' else 'By-Election'}}</td><td>{{e.election_date or '-'}}</td><td>{{contest_counts.get(e.id,0)}}</td><td>{% if e.is_current %}<span class="badge text-bg-success">CURRENT</span>{% else %}<span class="badge text-bg-secondary">HISTORICAL</span>{% endif %}</td><td>{% if not e.is_current %}<form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="select"><input type="hidden" name="election_id" value="{{e.id}}"><button class="btn btn-sm btn-outline-primary">Make Current</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>
+<div class="card card-body"><h4 class="rc11-subheading">Election History</h4><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Election</th><th>Type</th><th>Date</th><th>Contests</th><th>Status</th><th></th></tr></thead><tbody>{% for e in elections %}<tr><td><strong>{{e.title}}</strong></td><td>{{'General Election' if e.election_type=='general' else 'By-Election'}}</td><td>{{e.election_date or '-'}}</td><td>{{contest_counts.get(e.id,0)}}</td><td>{% if e.is_current %}<span class="badge text-bg-success">CURRENT</span>{% else %}<span class="badge text-bg-secondary">HISTORICAL</span>{% endif %}</td><td>{% if not e.is_current %}<form method="post" data-rc11-select-election data-rc11-select-election="{{e.title|e}}"><input type="hidden" name="csrf_token" value="{{csrf_token()}}"><input type="hidden" name="action" value="select"><input type="hidden" name="election_id" value="{{e.id}}"><button class="btn btn-sm btn-outline-primary">Make Current</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>
 <script>
+document.getElementById('createElectionForm').addEventListener('submit',function(event){
+ if(!this.checkValidity())return;
+ const title=this.elements.title.value.trim(), kind=this.elements.election_type.value==='general'?'General Election':'By-Election';
+ const current=this.elements.make_current.checked?'\nThis will also change the current election.':'';
+ if(!window.confirm('Create '+kind+' \"'+title+'\"?\nVoting will initially be CLOSED.'+current))event.preventDefault();
+});
+document.querySelectorAll('form[data-rc11-select-election]').forEach(form=>form.addEventListener('submit',function(event){
+ if(!window.confirm('Make \"'+this.dataset.rc11SelectElection+'\" the current election?\nThis changes which election is active.'))event.preventDefault();
+}));
 const et=document.getElementById('etype'), bf=document.getElementById('byFields'), bp=document.getElementById('byPos'), bc=document.getElementById('byCounty'), bx=document.getElementById('byCon'), bw=document.getElementById('byWard'), bcw=document.getElementById('byCountyWrap'), bxw=document.getElementById('byConWrap'), bww=document.getElementById('byWardWrap');
 function typeMode(){bf.style.display=et.value==='by_election'?'':'none'}; et.addEventListener('change',typeMode);typeMode();
 function posMode(){const p=bp.value,n=p==='President',co=['Governor','Senator','Woman Representative'].includes(p),mp=p==='Member of Parliament';bcw.style.display=n?'none':'';bxw.style.display=(n||co)?'none':'';bww.style.display=(n||co||mp)?'none':'';}bp.addEventListener('change',posMode);posMode();
 bc.addEventListener('change',async()=>{bx.disabled=true;bw.disabled=true;bw.innerHTML='<option value="">Select constituency first</option>';if(!bc.value)return;const r=await rc10.geography('/api/constituencies/'+bc.value,'byCon');bx.innerHTML='<option value="">Select constituency</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bx.disabled=r.length===0});
 bx.addEventListener('change',async()=>{bw.disabled=true;if(!bx.value)return;const r=await rc10.geography('/api/wards/'+bx.value,'byWard');bw.innerHTML='<option value="">Select ward</option>'+r.map(x=>`<option value="${x.id}">${x.name}</option>`).join('');bw.disabled=r.length===0});
-</script>{% endblock %}"""
+</script></div>{% endblock %}"""
 
 AUDIT_LOG_HTML = """
 {% extends "base.html" %}{% block content %}
