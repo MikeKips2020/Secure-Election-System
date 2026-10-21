@@ -1550,8 +1550,24 @@ VOTE_HTML = """
 """
 RESULTS_HTML = """
 {% extends "base.html" %}{% block content %}
-<div class="card mb-4"><div class="card-body p-4"><div class="d-flex justify-content-between gap-3 flex-wrap"><div><h2>{{ '🟢 ELECTION OPEN' if election_open else '🔴 ELECTION CLOSED' }}</h2><p class="mb-1"><strong>{{total_votes}}</strong> encrypted ballot records in the ledger.</p><p class="mb-0">Integrity: <span class="badge {{'text-bg-success' if integrity_status=='VALID' else 'text-bg-danger'}}">{{integrity_status.replace('_',' ')}}</span> &middot; {{verified_count}} verified</p></div><span class="badge {{'text-bg-success' if election_open else 'text-bg-secondary'}} align-self-start">{{'OPEN' if election_open else 'CLOSED'}}</span></div></div></div>
-{% if election_open %}<div class="alert alert-info">Candidate standings are hidden while polls are open.</div>
+<style>
+.rc11-results-hero{background:linear-gradient(115deg,#12233d,#23466a);color:#fff;border-radius:15px;padding:1.5rem 1.7rem;margin-bottom:1rem}
+.rc11-results-hero h1{font-size:clamp(1.45rem,2.6vw,2.05rem);font-weight:800;margin:0}
+.rc11-results-stat{border:1px solid #dce5ed;background:#fff;border-radius:12px;padding:1rem;height:100%}
+.rc11-results-stat small{display:block;color:#53667c;text-transform:uppercase;font-weight:700;letter-spacing:.04em}
+.rc11-results-stat strong{display:block;color:#12233d;font-size:1.55rem}
+.rc11-result-bar{height:8px;background:#e8edf3;border-radius:8px;overflow:hidden;margin-top:.4rem}
+.rc11-result-bar span{display:block;height:100%;border-radius:8px}
+</style>
+<section class="rc11-results-hero"><div class="d-flex justify-content-between align-items-center gap-3 flex-wrap"><div><div class="small fw-semibold" style="color:#b9d7f2;letter-spacing:.1em">RC11 · ELECTION RESULTS &amp; INTEGRITY</div><h1>{{ election.title }}</h1><div class="mt-2">{{ 'Voting open' if election_open else 'Voting closed' }} · {{ 'Administrator view' if is_admin else 'Public / voter view' }}</div></div><span class="badge {{ 'text-bg-success' if election_open else 'text-bg-light' }}">{{ 'OPEN' if election_open else 'CLOSED' }}</span></div></section>
+<div class="row row-cols-2 row-cols-lg-4 g-3 mb-3">
+<div class="col"><div class="rc11-results-stat"><small>Encrypted ballots</small><strong>{{ total_votes }}</strong></div></div>
+<div class="col"><div class="rc11-results-stat"><small>Verified ballots</small><strong>{{ verified_count }}</strong></div></div>
+<div class="col"><div class="rc11-results-stat"><small>Ledger integrity</small><strong class="{{ 'text-success' if integrity_status == 'VALID' else 'text-danger' }}">{{ integrity_status.replace('_',' ') }}</strong></div></div>
+<div class="col"><div class="rc11-results-stat"><small>Results publication</small><strong>{{ 'Released' if election.results_visible and not election_open else 'Unreleased' }}</strong></div></div>
+</div>
+{% if is_admin and not election.results_visible %}<div class="alert alert-info">Administrator-only preview: candidate results have not been published to voters or public visitors.</div>{% endif %}
+{% if election_open %}<div class="alert alert-info">Candidate standings are hidden while polls are open, including for administrators.</div>
 {% elif not show_candidate_results %}<div class="alert alert-warning">Voting is closed, but the administrator has not released final results.</div>
 {% else %}
 <style>
@@ -1563,7 +1579,7 @@ RESULTS_HTML = """
 .results-contest[hidden]{display:none!important}.results-empty{color:#5c6777}
 @media(max-width:575px){.results-pie{width:185px;height:185px}.results-chart-layout{justify-content:center}}
 </style>
-<h3>Final Results by Contest</h3>
+<h3>{{ "Administrator Results Preview" if not election.results_visible else "Final Results by Contest" }}</h3>
 <p class="text-muted">Each pie chart shows the percentage of valid recorded votes for its contest. Turnout is calculated separately using eligible voters.</p>
 <div class="results-controls">
  <div class="row g-3">
@@ -1581,7 +1597,7 @@ RESULTS_HTML = """
   {% if r.cast and r.candidates %}
   <div class="d-flex flex-wrap gap-4 align-items-center mt-3 results-chart-layout">
    <div class="results-pie" role="img" aria-label="Vote share pie chart for {{r.contest.position}} in {{r.area}}" style="background:conic-gradient({% for part in r.pie_parts %}{{part.color}} {{'%.5f'|format(part.start)}}% {{'%.5f'|format(part.end)}}%{% if not loop.last %}, {% endif %}{% endfor %})"></div>
-   <div class="results-legend">{% for part in r.pie_parts %}<div class="results-legend-row"><span class="d-flex align-items-center"><span class="results-swatch" style="background:{{part.color}}"></span><span><strong>{{part.candidate.name}}</strong><br><small class="text-muted">{{part.candidate.party}} ({{part.candidate.abbreviation}})</small></span></span><span class="text-end text-nowrap"><strong>{{part.votes}}</strong> votes<br><small>{{'%.1f'|format(part.percent)}}%</small></span></div>{% endfor %}</div>
+   <div class="results-legend">{% for part in r.pie_parts %}<div class="results-legend-row"><span class="d-flex align-items-center"><span class="results-swatch" style="background:{{part.color}}"></span><span><strong>{{part.candidate.name}}</strong><br><small class="text-muted">{{part.candidate.party}} ({{part.candidate.abbreviation}})</small></span></span><span class="text-end text-nowrap"><strong>{{part.votes}}</strong> votes<br><small>{{'%.1f'|format(part.percent)}}%</small><div class="rc11-result-bar" aria-hidden="true"><span style="width:{{ '%.2f'|format(part.percent) }}%;background:{{part.color}}"></span></div></span></div>{% endfor %}</div>
   </div>
   {% elif r.cast %}<p class="results-empty mt-3 mb-0">Ballots exist for this contest, but no active candidates are available to display. Please review the audit and candidate records.</p>
   {% else %}<p class="results-empty mt-3 mb-0">No ballots recorded for this contest.</p>{% endif %}
@@ -2968,6 +2984,9 @@ def results():
     election = get_election()
     user = current_user()
     is_admin = bool(user and user.role in ADMIN_ROLES)
+    # Never prepare candidate tallies for unauthorised viewers of unreleased results.
+    # Public users may still see the existing high-level integrity summary.
+    # The template never emits candidate data until results are released.
     # The hash chain is GLOBAL across elections. Verify every ledger entry in
     # insertion order, but decrypt and count ballots for the selected election only.
     # This avoids false failures when votes from multiple elections interleave.
@@ -3049,7 +3068,7 @@ def results():
     result_local_areas=sorted({r["local_area"] for r in contest_results if r["local_area"]})
     legacy_candidates={c.id:c for c in Candidate.query.filter(Candidate.id.in_(list(legacy_tally.keys()) or [-1])).all()}
     return render_template_string(RESULTS_HTML, election=election,election_open=election_is_open(election),is_admin=is_admin,
-        show_candidate_results=((not election_is_open(election)) and election.results_visible),total_votes=len(votes),verified_count=verified_count,
+        show_candidate_results=((not election_is_open(election)) and (is_admin or election.results_visible)),total_votes=len(votes),verified_count=verified_count,
         invalid_ballots=invalid_ballots,break_point=break_point,integrity_status=integrity_status,contest_results=contest_results,
         legacy_tally=legacy_tally,legacy_candidates=legacy_candidates,
         result_positions=result_positions,result_counties=result_counties,result_local_areas=result_local_areas)
