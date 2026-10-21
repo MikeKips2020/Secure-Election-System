@@ -1836,16 +1836,27 @@ CANDIDATES_HTML = """
 {% block content %}
 <style>
  .candidate-filter label,.candidate-form label{font-weight:600;color:#183a61}
- .candidate-filter .form-select,.candidate-form .form-control{background:#f5f9fd}
+ .candidate-filter .form-select,.candidate-form .form-control{background:#fff;border:1px solid #d9e2eb;min-height:42px}
+ .candidate-filter .form-select:focus,.candidate-form .form-control:focus{border-color:#0c8a5f;box-shadow:0 0 0 .2rem rgba(12,138,95,.12)}
  .candidate-card{border:1px solid #dfe7ef;border-radius:12px;padding:14px;margin-bottom:12px}
  .candidate-photo{width:76px;height:76px;object-fit:cover;border-radius:10px;background:#eef3f8}
  .party-symbol{width:52px;height:52px;object-fit:contain;border-radius:8px;background:white;border:1px solid #e2e8f0;padding:3px}
  .preview-img{width:92px;height:92px;object-fit:cover;border-radius:10px;border:1px solid #dbe3eb;background:white}
- .contest-banner{background:#edf6ff;border-left:4px solid #0d6efd;padding:12px 14px;border-radius:8px}
+ .contest-banner{background:#f4f8f6;border:1px solid #d6e8df;border-left:4px solid #0c8a5f;color:#173e32;padding:12px 14px;border-radius:8px}
+ .candidate-hero{background:linear-gradient(110deg,#12233d,#254b70);border-radius:15px;color:white;padding:26px 28px;margin-bottom:18px}
+ .candidate-hero .eyebrow{color:#acd7fa;font-size:.78rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
+ .candidate-hero h1{font-size:clamp(1.55rem,2.5vw,2.1rem);font-weight:800;margin:.35rem 0}
+ .candidate-subtle-note{color:#516477;font-size:.88rem;margin-top:12px}
+ .candidate-filter label{font-size:.9rem}
+ .candidate-card{background:#fff}
+ .candidate-page .card{border-color:#e2e8ef;border-radius:12px}
+ .candidate-page h3{font-size:1.35rem;font-weight:700;color:#12233d}
 </style>
+<div class="candidate-page">
+<div class="candidate-hero"><div class="eyebrow">RC11 · Election administration</div><h1>{{ "Candidate Management" if can_manage_candidates else "Candidate Directory" }}</h1><div>{{ election.title }} · {{ "Manage registered candidate profiles" if can_manage_candidates else "Browse registered candidates — read-only access" }}</div></div>
 <div class="row g-4">
  <div class="{{ 'col-lg-5' if can_manage_candidates else 'col-12' }}"><div class="card"><div class="card-body p-4">
-  <h3>{{ 'Candidate Registration' if can_manage_candidates else 'Select Election Contest' }}</h3>
+  <h3>{{ 'Candidate Registration' if can_manage_candidates else 'Select Election Contest' }}</h3><p class="text-muted small mb-3">Choose an electoral position and its applicable area to display the relevant candidates.</p>
   <div class="alert alert-light border small mb-3"><strong>Election:</strong> {{ election.title }}</div>
   <div class="candidate-filter">
    <div class="mb-3"><label class="form-label">Position</label><select id="position" class="form-select"></select></div>
@@ -1868,14 +1879,15 @@ CANDIDATES_HTML = """
    <button class="btn btn-primary" id="addCandidate" disabled>Add Candidate</button>
   </form>
   {% else %}
-  <div class="alert alert-info small mb-0">Select a position and electoral area to browse registered candidates. This directory is read-only.</div>
+  <p class="candidate-subtle-note mb-0">This directory is read-only. Select a contest to view candidate profiles.</p>
   {% endif %}
  </div></div></div>
  <div class="{{ 'col-lg-7' if can_manage_candidates else 'col-12' }}"><div class="card"><div class="card-body p-4">
   <div class="d-flex justify-content-between gap-3 flex-wrap"><div><h3>Registered Candidates</h3><h6 class="text-muted mb-3" id="candidateHeading">Select a contest</h6></div><div style="min-width:220px"><input id="candidateSearch" class="form-control" placeholder="Search candidates..."></div></div>
   <div id="candidateRows"><div class="text-muted">Choose a position and area to view candidates for that contest.</div></div>
-  {% if can_manage_candidates %}<div class="alert alert-info small mt-3">Candidates are withdrawn rather than deleted, preserving ballot history. Editing changes profile details only; the candidate remains attached to the same contest.</div>{% else %}<div class="alert alert-info small mt-3">Read-only candidate directory. Only Super Administrators can change candidate records.</div>{% endif %}
+  {% if can_manage_candidates %}<p class="candidate-subtle-note mb-0 mt-3">Withdrawals preserve ballot history. Profile edits do not move candidates between contests.</p>{% else %}<p class="candidate-subtle-note mb-0 mt-3">Read-only directory. Candidate record changes are restricted to Super Administrators.</p>{% endif %}
  </div></div></div>
+</div>
 </div>
 
 {% if can_manage_candidates %}
@@ -2015,29 +2027,38 @@ VOTER_DASHBOARD_HTML = """
 {% extends "base.html" %}
 {% block title %}Voter Dashboard — Kenya Secure E-Voting{% endblock %}
 {% block content %}
-<div class="row justify-content-center">
+<style>
+ .voter-hero{background:linear-gradient(110deg,#12233d,#254b70);color:#fff;border-radius:15px;padding:26px 28px;margin-bottom:18px}
+ .voter-hero .eyebrow{font-size:.77rem;letter-spacing:.09em;text-transform:uppercase;color:#acd7fa;font-weight:700}
+ .voter-hero h2{font-size:clamp(1.5rem,2.8vw,2.15rem);font-weight:800;margin:.3rem 0}
+ .voter-dashboard .card{border-color:#e2e8ef;border-radius:12px}
+ .voter-area-value{font-weight:600;color:#12233d}
+ .voter-stat{font-weight:800;color:#12233d}
+</style>
+<div class="voter-dashboard"><div class="row justify-content-center">
   <div class="col-lg-9">
-    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-      <div><h2 class="mb-1">Welcome, {{ user.full_name }}</h2>
-      <p class="text-muted mb-0">{{ election.title }}</p></div>
+    <div class="voter-hero d-flex flex-wrap justify-content-between align-items-center gap-2">
+      <div><div class="eyebrow">RC11 · Voter dashboard</div><h2>Welcome, {{ user.full_name }}</h2>
+      <p class="mb-0">{{ election.title }}</p></div>
       <span class="badge {{ 'text-bg-success' if voting_open else 'text-bg-secondary' }} fs-6">
         Voting {{ 'OPEN' if voting_open else 'CLOSED' }}</span>
     </div>
     <div class="card mb-3"><div class="card-body">
-      <h5>Your Electoral Area</h5>
+      <h5 class="fw-bold">Your Electoral Area</h5>
+      {% if has_national_contest %}<div class="rounded-3 border p-3 mb-3" style="background:#f4f8f6;border-color:#d6e8df!important"><span class="small text-muted d-block">National election eligibility</span><strong class="voter-area-value">Nationwide — Kenya</strong><div class="small text-muted mt-1">National contests do not require a county, constituency or ward assignment.</div></div>{% endif %}
       <div class="row g-2">
-        <div class="col-md-4"><strong>County</strong><br>{{ area.county }}</div>
-        <div class="col-md-4"><strong>Constituency</strong><br>{{ area.constituency }}</div>
-        <div class="col-md-4"><strong>Ward</strong><br>{{ area.ward }}</div>
+        <div class="col-md-4"><strong>County</strong><br><span class="voter-area-value">{{ area.county }}</span></div>
+        <div class="col-md-4"><strong>Constituency</strong><br><span class="voter-area-value">{{ area.constituency }}</span></div>
+        <div class="col-md-4"><strong>Ward</strong><br><span class="voter-area-value">{{ area.ward }}</span></div>
       </div>
     </div></div>
     <div class="row g-3 mb-3">
       <div class="col-sm-6"><div class="card"><div class="card-body">
-        <div class="text-muted">Eligible contests</div><div class="display-6">{{ eligible_count }}</div>
+        <div class="text-muted">Eligible contests</div><div class="display-6 voter-stat">{{ eligible_count }}</div>
       </div></div></div>
       <div class="col-sm-6"><div class="card"><div class="card-body">
         <div class="text-muted">Ballots submitted</div>
-        <div class="display-6">{{ completed_count }} / {{ eligible_count }}</div>
+        <div class="display-6 voter-stat">{{ completed_count }} / {{ eligible_count }}</div>
       </div></div></div>
     </div>
     <div class="card"><div class="card-body">
@@ -2079,7 +2100,7 @@ VOTER_DASHBOARD_HTML = """
       <div class="mt-3"><a href="{{ url_for('results') }}">View Election Audit &amp; Results</a></div>
     </div></div>
   </div>
-</div>
+</div></div>
 {% endblock %}
 """
 
@@ -2226,7 +2247,8 @@ def voter_dashboard():
         user=user, election=election, area=voter_area(user),
         contest_statuses=contest_statuses,
         voting_open=election_is_open(election),
-        eligible_count=len(contests), completed_count=completed_count
+        eligible_count=len(contests), completed_count=completed_count,
+        has_national_contest=any(c.scope_level == "national" for c in contests)
     )
 
 
