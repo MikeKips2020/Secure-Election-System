@@ -3309,84 +3309,41 @@ def general_admin_dashboard():
 
     return render_template_string(
         """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>General Administrator Dashboard</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    background: #f4f7fb;
-                    padding: 30px;
-                    color: #17365d;
-                }
-                .panel {
-                    max-width: 850px;
-                    margin: auto;
-                    background: white;
-                    padding: 25px;
-                    border-radius: 10px;
-                    box-shadow: 0 2px 10px #ddd;
-                }
-                h1 {
-                    color: #12345a;
-                }
-                .stat {
-                    padding: 12px;
-                    margin: 10px 0;
-                    background: #eef3f9;
-                    border-radius: 6px;
-                }
-                a {
-                    display: inline-block;
-                    margin: 10px 12px 0 0;
-                    color: #174c86;
-                    font-weight: bold;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="panel">
-                <h1>General Administrator Dashboard</h1>
-
-                <h2>{{ election.title }}</h2>
-
-                <div class="stat">
-                    Election Status:
-                    <strong>
-                        {{ "Open" if election_open else "Closed" }}
-                    </strong>
-                </div>
-
-                <div class="stat">
-                    Registered Voters:
-                    <strong>{{ registered_voters }}</strong>
-                </div>
-
-                <div class="stat">
-                    Recorded Ballots:
-                    <strong>{{ total_votes }}</strong>
-                </div>
-
-                <h3>Administration</h3>
-                <a href="{{ url_for('manage_voters') }}">View Voters (read-only)</a>
-
-                <a href="{{ url_for('manage_candidates') }}">
-                    {{ "Manage Candidates" if user.role in ("super_admin", "admin") else "View Candidates" }}
-                </a>
-
-                <a href="{{ url_for('full_audit_log') }}">
-                    View Audit Records
-                </a>
-
-                <a href="{{ url_for('logout') }}">
-                    Logout
-                </a>
+        {% extends "base.html" %}
+        {% block title %}General Administrator Dashboard — RC11{% endblock %}
+        {% block content %}
+        <style>
+          .ga-hero{background:linear-gradient(110deg,#12233d,#23486c);color:white;border-radius:14px;padding:26px;margin-bottom:18px}
+          .ga-stat{background:#fff;border:1px solid #dce5ed;border-radius:12px;padding:18px;height:100%}
+          .ga-stat-label{font-size:.8rem;letter-spacing:.05em;text-transform:uppercase;color:#536780;font-weight:700}
+          .ga-stat-value{font-size:1.7rem;color:#12233d;font-weight:800}
+          .ga-action{border:1px solid #dce5ed;border-radius:10px;padding:18px;height:100%;background:#fff}
+        </style>
+        <section class="ga-hero">
+          <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <div><div class="text-uppercase small fw-semibold" style="color:#b9d7f2;letter-spacing:.08em">RC11 · Election Administration</div>
+              <h1 class="fw-bold mt-1 mb-1">General Administrator Dashboard</h1>
+              <p class="mb-0" style="color:#dce9f5">{{ election.title }}</p>
             </div>
-        </body>
-        </html>
+            <span class="badge bg-light text-dark">Voting {{ 'OPEN' if election_open else 'CLOSED' }}</span>
+          </div>
+        </section>
+        <div class="row row-cols-1 row-cols-md-3 g-3 mb-4">
+          <div class="col"><div class="ga-stat"><div class="ga-stat-label">Election status</div><div class="ga-stat-value">{{ 'OPEN' if election_open else 'CLOSED' }}</div></div></div>
+          <div class="col"><div class="ga-stat"><div class="ga-stat-label">Registered voters</div><div class="ga-stat-value">{{ registered_voters }}</div></div></div>
+          <div class="col"><div class="ga-stat"><div class="ga-stat-label">Recorded ballots</div><div class="ga-stat-value">{{ total_votes }}</div></div></div>
+        </div>
+        <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+          <h2 class="h4 mb-0">Administration</h2>
+          <span class="badge text-bg-info">General Admin · Read-only</span>
+        </div>
+        <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3">
+          <div class="col"><div class="ga-action"><h3 class="h6 fw-bold">Voter records</h3><p class="text-muted small">View voter registration, verification and participation.</p><a class="btn btn-outline-primary" href="{{ url_for('manage_voters') }}">View Voters</a></div></div>
+          <div class="col"><div class="ga-action"><h3 class="h6 fw-bold">Candidates</h3><p class="text-muted small">Browse candidate information without editing.</p><a class="btn btn-outline-primary" href="{{ url_for('manage_candidates') }}">View Candidates</a></div></div>
+          <div class="col"><div class="ga-action"><h3 class="h6 fw-bold">Audit and results</h3><p class="text-muted small">Review authorised election results and security records.</p><div class="d-flex gap-2 flex-wrap"><a class="btn btn-outline-primary" href="{{ url_for('results') }}">Audit &amp; Results</a><a class="btn btn-outline-secondary" href="{{ url_for('full_audit_log') }}">Audit Log</a></div></div></div>
+        </div>
+        <p class="text-muted small mt-3">General Administrators cannot change election settings, suspend voters or publish results.</p>
+        {% endblock %}
         """,
         election=election,
         election_open=election_is_open(election),
@@ -3394,6 +3351,7 @@ def general_admin_dashboard():
         total_votes=total_votes,
         user=user,
     )
+
 
 
 # ----------------------------------------------------------------------------
