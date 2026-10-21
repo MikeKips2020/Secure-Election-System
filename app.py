@@ -2071,38 +2071,76 @@ VOTERS_HTML = """
 {% extends "base.html" %}
 {% block title %}Voter Management — RC11{% endblock %}
 {% block content %}
-<h2>Voter Management</h2>
-<p class="text-muted">Registration and participation status only. Candidate selections and ballot contents are never displayed.</p>
-<div class="d-flex gap-2 flex-wrap mb-3">
-  <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin_dashboard') if can_manage else url_for('general_admin_dashboard') }}">Back to Dashboard</a>
-  <span class="badge text-bg-secondary align-self-center">{{ total }} matching voters</span>
-  {% if not can_manage %}<span class="badge text-bg-info align-self-center">Read-only access</span>{% endif %}
+<style>
+.vm-hero{background:linear-gradient(115deg,#12233d,#23466a);color:white;border-radius:14px;padding:24px;margin-bottom:18px}
+.vm-hero h1{font-size:clamp(1.5rem,3vw,2rem);font-weight:800}
+.vm-stat{border:1px solid #dce5ed;border-radius:12px;background:#fff;padding:16px;height:100%}
+.vm-stat .number{font-size:1.8rem;font-weight:800;color:#12233d}
+.vm-stat .label{font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:#50637a}
+.vm-filters{border:1px solid #dce5ed;border-radius:12px;background:white;padding:16px}
+.vm-table th{white-space:nowrap;background:#f0f4f8;color:#12233d;font-size:.85rem}
+.vm-table td{vertical-align:middle}
+.vm-area{max-width:260px;min-width:180px;white-space:normal;font-size:.88rem}
+.vm-email{overflow-wrap:anywhere;max-width:260px}
+.vm-table tbody tr:hover{background:#f6faff}
+.vm-count{font-weight:700;font-variant-numeric:tabular-nums}
+@media(max-width:767px){.vm-hero{padding:18px}.vm-table{font-size:.9rem}}
+</style>
+<section class="vm-hero">
+  <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+    <div><div class="small text-uppercase fw-semibold" style="letter-spacing:.1em;color:#b9d7f2">RC11 · Election Administration</div>
+      <h1 class="mb-1">Voter Management</h1>
+      <p class="mb-0" style="color:#dce9f5">Registration, eligibility and participation records — never candidate selections.</p></div>
+    <a class="btn btn-outline-light btn-sm" href="{{ url_for('admin_dashboard') if can_manage else url_for('general_admin_dashboard') }}">← Back to Dashboard</a>
+  </div>
+</section>
+<div class="row row-cols-2 row-cols-lg-4 g-3 mb-3">
+  <div class="col"><div class="vm-stat"><div class="label">Total voters</div><div class="number">{{ stats.total }}</div></div></div>
+  <div class="col"><div class="vm-stat"><div class="label">Email verified</div><div class="number">{{ stats.verified }}</div></div></div>
+  <div class="col"><div class="vm-stat"><div class="label">Email unverified</div><div class="number">{{ stats.unverified }}</div></div></div>
+  <div class="col"><div class="vm-stat"><div class="label">Suspended accounts</div><div class="number">{{ stats.suspended }}</div></div></div>
 </div>
-<form method="GET" class="row g-2 mb-3">
- <div class="col-md-7"><input class="form-control" name="q" maxlength="150" value="{{ search }}" placeholder="Search name or email" aria-label="Search voters"></div>
- <div class="col-auto"><button class="btn btn-primary">Search</button></div>
-</form>
-<div class="table-responsive"><table class="table table-striped table-sm align-middle">
-<thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Email verified</th><th>Electoral area</th><th>Eligible contests</th><th>Ballot receipts</th><th>Account</th>{% if can_manage %}<th>Action</th>{% endif %}</tr></thead>
-<tbody>{% for row in rows %}
-<tr><td>{{ row.user.id }}</td><td>{{ row.user.full_name }}</td><td>{{ row.user.email }}</td>
-<td>{{ 'Yes' if row.user.email_verified else 'No' }}</td>
-<td>{{ row.area }}</td><td>{{ row.eligible }}</td><td>{{ row.receipts }}</td>
-<td>{{ 'Enabled' if row.user.account_enabled else 'Suspended' }}</td>
+<div class="vm-filters mb-3">
+  <form method="GET" class="row g-3 align-items-end">
+    <div class="col-lg-5"><label for="vmSearch" class="form-label fw-semibold">Find a voter</label><input id="vmSearch" class="form-control" name="q" maxlength="150" value="{{ search }}" placeholder="Name or email"></div>
+    <div class="col-sm-6 col-lg-2"><label for="vmStatus" class="form-label fw-semibold">Account</label>
+      <select id="vmStatus" name="status" class="form-select"><option value="">All accounts</option><option value="enabled" {% if status_filter == 'enabled' %}selected{% endif %}>Enabled</option><option value="suspended" {% if status_filter == 'suspended' %}selected{% endif %}>Suspended</option></select></div>
+    <div class="col-sm-6 col-lg-2"><label for="vmVerified" class="form-label fw-semibold">Email</label>
+      <select id="vmVerified" name="verified" class="form-select"><option value="">All verification</option><option value="yes" {% if verified_filter == 'yes' %}selected{% endif %}>Verified</option><option value="no" {% if verified_filter == 'no' %}selected{% endif %}>Unverified</option></select></div>
+    <div class="col-lg-3 d-flex gap-2"><button class="btn btn-primary flex-grow-1" type="submit">Apply filters</button><a class="btn btn-outline-secondary" href="{{ url_for('manage_voters') }}">Reset</a></div>
+  </form>
+  <div class="d-flex gap-2 align-items-center flex-wrap mt-3">
+    <span class="badge text-bg-secondary">{{ total }} matching voters</span>
+    {% if not can_manage %}<span class="badge text-bg-info">Read-only administrator</span>{% endif %}
+    <span class="text-muted small">Summary cards cover all registered voter accounts; filters apply to the table below.</span>
+  </div>
+</div>
+<div class="table-responsive rounded-3 border bg-white">
+<table class="table table-striped vm-table mb-0">
+<thead><tr><th scope="col">ID</th><th scope="col">Voter</th><th scope="col">Email</th><th scope="col">Verification</th><th scope="col">Electoral area</th><th scope="col">Eligible contests</th><th scope="col">Ballot receipts</th><th scope="col">Account</th>{% if can_manage %}<th scope="col">Action</th>{% endif %}</tr></thead>
+<tbody>
+{% for row in rows %}
+<tr>
+<td class="text-muted">#{{ row.user.id }}</td><td class="fw-semibold">{{ row.user.full_name }}</td><td class="vm-email">{{ row.user.email }}</td>
+<td>{% if row.user.email_verified %}<span class="badge text-bg-success">Verified</span>{% else %}<span class="badge text-bg-warning">Unverified</span>{% endif %}</td>
+<td class="vm-area">{{ row.area }}</td><td class="vm-count">{{ row.eligible }}</td><td class="vm-count">{{ row.receipts }}</td>
+<td>{% if row.user.account_enabled %}<span class="badge text-bg-success">Enabled</span>{% else %}<span class="badge text-bg-danger">Suspended</span>{% endif %}</td>
 {% if can_manage %}<td>
-<form method="POST" action="{{ url_for('set_voter_account_status', user_id=row.user.id) }}" onsubmit="return confirm('Confirm changing this voter account status? Existing ballots will remain untouched.');">
-<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-<input type="hidden" name="enabled" value="{{ '0' if row.user.account_enabled else '1' }}">
-<button class="btn btn-sm {{ 'btn-outline-danger' if row.user.account_enabled else 'btn-outline-success' }}">{{ 'Suspend' if row.user.account_enabled else 'Restore' }}</button>
-</form></td>{% endif %}</tr>
-{% else %}<tr><td colspan="9">No voters found.</td></tr>{% endfor %}
+<form method="POST" action="{{ url_for('set_voter_account_status', user_id=row.user.id) }}" onsubmit="return confirm({{ ('Suspend this voter account? Login and authenticated access will be blocked. Existing ballots remain unchanged.' if row.user.account_enabled else 'Restore this voter account? Existing ballots remain unchanged.')|tojson }});">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="enabled" value="{{ '0' if row.user.account_enabled else '1' }}">
+<button type="submit" class="btn btn-sm {{ 'btn-outline-danger' if row.user.account_enabled else 'btn-outline-success' }}">{{ 'Suspend' if row.user.account_enabled else 'Restore' }}</button>
+</form></td>{% endif %}
+</tr>
+{% else %}<tr><td colspan="{{ 9 if can_manage else 8 }}" class="text-center text-muted py-4">No voters match these filters.</td></tr>{% endfor %}
 </tbody></table></div>
-<div class="d-flex gap-3 mt-3">
-{% if page > 1 %}<a href="{{ url_for('manage_voters', q=search, page=page-1) }}">Previous</a>{% endif %}
-<span>Page {{ page }} of {{ pages }}</span>
-{% if page < pages %}<a href="{{ url_for('manage_voters', q=search, page=page+1) }}">Next</a>{% endif %}
-</div>
-<p class="small text-muted mt-3">Suspension blocks login and authenticated access. It never deletes voters, receipts, encrypted ballots, or audit records. Participation totals are not evidence of individual candidate choices.</p>
+<nav class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3" aria-label="Voter pages">
+ <span class="text-muted small">Page {{ page }} of {{ pages }}</span>
+ <div class="btn-group">
+ {% if page > 1 %}<a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_voters', q=search, status=status_filter, verified=verified_filter, page=page-1) }}">← Previous</a>{% endif %}
+ {% if page < pages %}<a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_voters', q=search, status=status_filter, verified=verified_filter, page=page+1) }}">Next →</a>{% endif %}
+ </div>
+</nav>
+<p class="small text-muted mt-3">Suspension does not delete accounts, receipts, encrypted ballots or audit records. Participation totals do not reveal individual candidate choices.</p>
 {% endblock %}
 """
 
@@ -3165,7 +3203,24 @@ def manage_voters():
         page = max(1, int(request.args.get("page", "1")))
     except ValueError:
         page = 1
-    query = User.query.filter(User.role == ROLE_VOTER)
+    status_filter = request.args.get("status", "")
+    verified_filter = request.args.get("verified", "")
+    if status_filter not in ("", "enabled", "suspended"):
+        status_filter = ""
+    if verified_filter not in ("", "yes", "no"):
+        verified_filter = ""
+    base_query = User.query.filter(User.role == ROLE_VOTER)
+    stats = {
+        "total": base_query.count(),
+        "verified": base_query.filter(User.email_verified.is_(True)).count(),
+        "unverified": base_query.filter(User.email_verified.is_(False)).count(),
+        "suspended": base_query.filter(User.account_enabled.is_(False)).count(),
+    }
+    query = base_query
+    if status_filter:
+        query = query.filter(User.account_enabled.is_(status_filter == "enabled"))
+    if verified_filter:
+        query = query.filter(User.email_verified.is_(verified_filter == "yes"))
     if search:
         term = "%" + search + "%"
         query = query.filter(db.or_(User.full_name.ilike(term), User.email.ilike(term)))
@@ -3193,7 +3248,8 @@ def manage_voters():
         rows.append(dict(user=v, eligible=eligible, receipts=counts.get(v.id, 0),
                          area=" / ".join((area["county"], area["constituency"], area["ward"]))))
     return render_template_string(VOTERS_HTML, rows=rows, total=total, pages=pages,
-                                  page=page, search=search, can_manage=can_manage)
+                                  page=page, search=search, can_manage=can_manage, stats=stats,
+                                  status_filter=status_filter, verified_filter=verified_filter)
 
 
 @app.route("/admin/voters/<int:user_id>/status", methods=["POST"])
