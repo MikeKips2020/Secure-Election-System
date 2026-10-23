@@ -219,7 +219,7 @@ class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     full_name = db.Column(db.String(150), nullable=False)
     email = db.Column(db.String(150), unique=True, nullable=False, index=True)
-    national_id = db.Column(db.String(8), unique=True, nullable=False, index=True)
+    national_id = db.Column(db.String(8), unique=True, nullable=True, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     has_voted = db.Column(db.Boolean, default=False, nullable=False)
     email_verified = db.Column(db.Boolean, default=False, nullable=False)
@@ -685,6 +685,20 @@ def migrate_database():
             connection.execute(text(
                 "UPDATE users SET email_verified = TRUE WHERE email_verified = FALSE"
             ))
+
+    # RC12: Admin accounts have no voter National ID. PostgreSQL additive change;
+    # existing voter IDs and all ballot tables are left untouched.
+    if db.engine.dialect.name == "postgresql":
+        with db.engine.begin() as connection:
+            connection.execute(text("ALTER TABLE users ALTER COLUMN national_id DROP NOT NULL"))
+    elif db.engine.dialect.name == "sqlite":
+        # Existing SQLite installations may require an explicit table rebuild.
+        # Fail safely instead of silently creating admin records with fake IDs.
+        national_id_column = next((c for c in inspect(db.engine).get_columns("users")
+                                   if c["name"] == "national_id"), None)
+        if national_id_column and not national_id_column["nullable"]:
+            print("[RC12 WARNING] Existing SQLite users.national_id is NOT NULL; "
+                  "admin creation without a National ID requires a reviewed SQLite migration.")
 
     # Version 2.1 additive schema upgrades. Existing ballots are never rewritten.
     inspector = inspect(db.engine)
@@ -1737,6 +1751,7 @@ ADMIN_HTML = """
         <h3 class="mt-4 mb-3">Quick Access</h3>
         <nav class="dashboard-nav mb-4" aria-label="Administrator tools">
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_voters') }}">Manage Voters</a>
+          <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_admin_accounts') }}">Manage General Admins</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_candidates') }}">Manage Candidates</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_regions') }}">Manage Counties</a>
           <a class="btn btn-outline-primary btn-sm" href="{{ url_for('manage_geography') }}">Constituencies & Wards</a>
@@ -2163,7 +2178,7 @@ VOTERS_HTML = """
 </style>
 <section class="vm-hero">
   <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
-    <div><div class="small text-uppercase fw-semibold" style="letter-spacing:.1em;color:#b9d7f2">RC11 · Election Administration</div>
+    <div><div class="small text-uppercase fw-semibold" style="letter-spacing:.1em;color:#b9d7f2">RC12 · Election Administration</div>
       <h1 class="mb-1">Voter Management</h1>
       <p class="mb-0" style="color:#dce9f5">Registration, eligibility and participation records — never candidate selections.</p></div>
     <a class="btn btn-outline-light btn-sm" href="{{ url_for('admin_dashboard') if can_manage else url_for('general_admin_dashboard') }}">← Back to Dashboard</a>
@@ -2201,6 +2216,7 @@ VOTERS_HTML = """
 <td class="vm-area">{{ row.area }}</td><td class="vm-count">{{ row.eligible }}</td><td class="vm-count">{{ row.receipts }}</td>
 <td>{% if row.user.account_enabled %}<span class="badge text-bg-success">Enabled</span>{% else %}<span class="badge text-bg-danger">Suspended</span>{% endif %}</td>
 {% if can_manage %}<td>
+<a class="btn btn-sm btn-outline-primary mb-2" href="{{ url_for('edit_voter', user_id=row.user.id) }}">Edit</a>
 <form method="POST" action="{{ url_for('set_voter_account_status', user_id=row.user.id) }}" onsubmit="return confirm({{ ('Suspend this voter account? Login and authenticated access will be blocked. Existing ballots remain unchanged.' if row.user.account_enabled else 'Restore this voter account? Existing ballots remain unchanged.')|tojson }});">
 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="enabled" value="{{ '0' if row.user.account_enabled else '1' }}">
 <button type="submit" class="btn btn-sm {{ 'btn-outline-danger' if row.user.account_enabled else 'btn-outline-success' }}">{{ 'Suspend' if row.user.account_enabled else 'Restore' }}</button>
@@ -2554,9 +2570,14 @@ def reset_password(token):
 
         user.set_password(password)
         record.used = True
+        if user.role == ROLE_GENERAL_ADMIN and not user.email_verified:
+            user.email_verified = True
+            user.account_enabled = True
+            db.session.add(AuditEvent(event_type="GENERAL_ADMIN_ACTIVATED", severity="WARNING",
+                                      user_id=user.id, details=f"admin_id={user.id}; invitation accepted"))
         db.session.commit()
 
-        flash("Password reset successful. You may now log in.", "success")
+        flash("Password set successfully. You may now log in.", "success")
         return redirect(url_for("login"))
 
     return render_template_string(RESET_PASSWORD_HTML)
@@ -3350,6 +3371,190 @@ def set_voter_account_status(user_id):
     return redirect(url_for("manage_voters"))
 
 
+# RC12 — Restricted administrative account provisioning and voter corrections.
+# Neither workflow modifies Vote, BallotReceipt or hash-chain records.
+ADMIN_ACCOUNTS_HTML = """
+{% extends "base.html" %}
+{% block title %}Manage General Administrators — RC12{% endblock %}
+{% block content %}
+<div class="rc11-workspace"><div class="rc11-page-header"><h2>General Administrator Accounts</h2>
+<p>Super Admin only · New administrators are invited directly, not promoted from voters.</p></div>
+<div class="card mb-4"><div class="card-body"><h4>Create General Administrator</h4>
+<p class="text-muted small">An invitation link to set a password expires after 15 minutes. The account stays disabled until activation.</p>
+<form method="post" class="row g-3"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="col-md-5"><label class="form-label" for="adminName">Full name</label><input id="adminName" class="form-control" name="full_name" maxlength="150" required></div>
+<div class="col-md-5"><label class="form-label" for="adminEmail">Email</label><input id="adminEmail" class="form-control" name="email" type="email" maxlength="150" required></div>
+<div class="col-md-2 align-self-end"><button class="btn btn-primary w-100">Create &amp; invite</button></div></form></div></div>
+<div class="card"><div class="card-body"><h4>General Administrators</h4><div class="table-responsive"><table class="table"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+{% for a in admins %}<tr><td>{{ a.id }}</td><td>{{ a.full_name }}</td><td>{{ a.email }}</td><td>{{ 'Enabled' if a.account_enabled else 'Disabled / pending' }}</td><td>
+<form method="post" action="{{ url_for('set_general_admin_status', user_id=a.id) }}" onsubmit="return confirm('Change this administrator account status?');">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="enabled" value="{{ '0' if a.account_enabled else '1' }}"><button class="btn btn-sm btn-outline-secondary">{{ 'Suspend' if a.account_enabled else 'Enable (activated only)' }}</button></form>
+</td></tr>{% else %}<tr><td colspan="5">No General Administrator accounts.</td></tr>{% endfor %}
+</tbody></table></div></div></div><p class="mt-3"><a href="{{ url_for('admin_dashboard') }}">← Super Admin Dashboard</a></p></div>
+{% endblock %}
+"""
+
+EDIT_VOTER_HTML = """
+{% extends "base.html" %}
+{% block title %}Edit Voter — RC12{% endblock %}
+{% block content %}
+<div class="rc11-workspace"><div class="rc11-page-header"><h2>Edit Voter #{{ voter.id }}</h2><p>Controlled corrections with an audit trail. Ballots and receipts are never changed.</p></div>
+<div class="card"><div class="card-body">
+{% if locked %}<div class="alert alert-warning">This voter has submitted a ballot. Their electoral area and National ID are locked to protect eligibility and election integrity.</div>{% endif %}
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="mb-3"><label class="form-label">Full name</label><input class="form-control" name="full_name" value="{{ voter.full_name }}" maxlength="150" required></div>
+<div class="mb-3"><label class="form-label">Email</label><input class="form-control" name="email" type="email" value="{{ voter.email }}" maxlength="150" required></div>
+<div class="mb-3"><label class="form-label">National ID</label><input class="form-control" name="national_id" value="{{ voter.national_id or '' }}" pattern="[0-9]{7,8}" required {{ 'readonly' if locked else '' }}></div>
+<div class="row g-3 mb-3"><div class="col-md-4"><label class="form-label">County</label><select class="form-select" name="region_id" id="rc12County" {{ 'disabled' if locked else '' }} required><option value="">Select county</option>{% for c in regions %}<option value="{{ c.id }}" {{ 'selected' if c.id == voter.region_id else '' }}>{{ c.name }}</option>{% endfor %}</select></div>
+<div class="col-md-4"><label class="form-label">Constituency</label><select class="form-select" name="constituency_id" id="rc12Constituency" {{ 'disabled' if locked else '' }} required>{% for c in constituencies %}<option value="{{ c.id }}" {{ 'selected' if c.id == voter.constituency_id else '' }}>{{ c.name }}</option>{% endfor %}</select></div>
+<div class="col-md-4"><label class="form-label">Ward</label><select class="form-select" name="ward_id" id="rc12Ward" {{ 'disabled' if locked else '' }} required>{% for w in wards %}<option value="{{ w.id }}" {{ 'selected' if w.id == voter.ward_id else '' }}>{{ w.name }}</option>{% endfor %}</select></div></div>
+<p class="text-muted small">Changing email requires the voter to verify the new address before login. This does not reset their password.</p>
+<button class="btn btn-primary" type="submit">Save audited changes</button> <a class="btn btn-outline-secondary" href="{{ url_for('manage_voters') }}">Cancel</a>
+</form></div></div></div>
+{% if not locked %}<script>
+const county=document.getElementById('rc12County'), cons=document.getElementById('rc12Constituency'), ward=document.getElementById('rc12Ward');
+async function fill(select,url){select.replaceChildren(new Option('Loading…',''));select.disabled=true;try{const res=await fetch(url);if(!res.ok)throw Error();const rows=await res.json();select.replaceChildren(new Option('Select…',''));rows.forEach(x=>select.add(new Option(x.name,x.id)));}catch(e){select.replaceChildren(new Option('Unable to load — reselect parent',''));}finally{select.disabled=false;}}
+county.addEventListener('change',()=>{ward.replaceChildren(new Option('Select constituency first',''));cons.replaceChildren(new Option('Select county first',''));if(county.value)fill(cons,'/api/constituencies/'+county.value);});
+cons.addEventListener('change',()=>{ward.replaceChildren(new Option('Select constituency first',''));if(cons.value)fill(ward,'/api/wards/'+cons.value);});
+</script>{% endif %}
+{% endblock %}
+"""
+
+
+def _admin_invitation(user):
+    token = serializer.dumps({"email": user.email, "nonce": secrets.token_urlsafe(16)}, salt=RESET_SALT)
+    PasswordResetToken.query.filter_by(user_id=user.id, used=False).update({"used": True})
+    db.session.add(PasswordResetToken(user_id=user.id, token=token,
+                                      expires_at=datetime.utcnow() + timedelta(seconds=RESET_TOKEN_MAX_AGE_SECONDS)))
+    return token
+
+
+@app.route("/admin/general-admins", methods=["GET", "POST"])
+@super_admin_required
+def manage_admin_accounts():
+    if request.method == "POST":
+        validate_csrf()
+        name = request.form.get("full_name", "").strip()
+        email = request.form.get("email", "").strip().lower()
+        if not (1 <= len(name) <= 150) or not EMAIL_REGEX.fullmatch(email) or len(email) > 150:
+            flash("Enter a valid administrator name and email.", "danger")
+        elif User.query.filter(db.func.lower(User.email) == email).first():
+            flash("An account already uses that email. Existing voters cannot be promoted here.", "danger")
+        else:
+            user = User(full_name=name, email=email, national_id=None, role=ROLE_GENERAL_ADMIN,
+                        email_verified=False, account_enabled=False)
+            user.set_password(secrets.token_urlsafe(48))
+            try:
+                db.session.add(user)
+                db.session.flush()
+                token = _admin_invitation(user)
+                db.session.add(AuditEvent(event_type="GENERAL_ADMIN_CREATED", severity="WARNING",
+                                          user_id=current_user().id, details=f"admin_id={user.id}; email={email}"))
+                db.session.commit()
+                url = url_for("reset_password", token=token, _external=True)
+                if send_email(email, "Activate your General Administrator account",
+                              '<p>You have been invited as a General Administrator.</p><p><a href="' + url + '">Set your password and activate your account</a></p><p>This invitation expires in 15 minutes.</p>',
+                              "admin_invitation"):
+                    flash("Administrator created; invitation email sent.", "success")
+                else:
+                    flash("Account created but invitation email failed. It remains disabled; resolve email delivery before activation.", "warning")
+            except IntegrityError:
+                db.session.rollback()
+                flash("Account creation failed: email must be unique and the admin National ID column must permit NULL.", "danger")
+        return redirect(url_for("manage_admin_accounts"))
+    admins = User.query.filter_by(role=ROLE_GENERAL_ADMIN).order_by(User.id).all()
+    return render_template_string(ADMIN_ACCOUNTS_HTML, admins=admins)
+
+
+@app.route("/admin/general-admins/<int:user_id>/status", methods=["POST"])
+@super_admin_required
+def set_general_admin_status(user_id):
+    validate_csrf()
+    admin = db.session.get(User, user_id)
+    enabled = request.form.get("enabled")
+    if not admin or admin.role != ROLE_GENERAL_ADMIN or enabled not in ("0", "1"):
+        abort(400)
+    if enabled == "1" and not admin.email_verified:
+        flash("The administrator must activate their account and verify their email first.", "danger")
+        return redirect(url_for("manage_admin_accounts"))
+    admin.account_enabled = enabled == "1"
+    db.session.add(AuditEvent(event_type="GENERAL_ADMIN_STATUS_CHANGED", severity="WARNING",
+                              user_id=current_user().id, details=f"admin_id={user_id}; enabled={enabled}"))
+    db.session.commit()
+    flash("Administrator status updated.", "success")
+    return redirect(url_for("manage_admin_accounts"))
+
+
+@app.route("/admin/voters/<int:user_id>/edit", methods=["GET", "POST"])
+@super_admin_required
+def edit_voter(user_id):
+    voter = db.session.get(User, user_id)
+    if not voter or voter.role != ROLE_VOTER:
+        abort(404)
+    locked = db.session.query(BallotReceipt.id).filter_by(user_id=user_id).first() is not None or voter.has_voted
+    if request.method == "POST":
+        validate_csrf()
+        name = request.form.get("full_name", "").strip()
+        email = request.form.get("email", "").strip().lower()
+        national_id = voter.national_id if locked else request.form.get("national_id", "").strip()
+        errors = []
+        if not (1 <= len(name) <= 150): errors.append("Full name is required (maximum 150 characters).")
+        if not EMAIL_REGEX.fullmatch(email) or len(email) > 150: errors.append("Enter a valid email.")
+        if not NATIONAL_ID_REGEX.fullmatch(national_id or ""): errors.append("National ID must be 7–8 digits.")
+        if User.query.filter(db.func.lower(User.email) == email, User.id != voter.id).first(): errors.append("Email is already registered.")
+        if User.query.filter(User.national_id == national_id, User.id != voter.id).first(): errors.append("National ID is already registered.")
+        old = {"name": voter.full_name, "email": voter.email, "national_id": voter.national_id,
+               "county": voter.region_id, "constituency": voter.constituency_id, "ward": voter.ward_id}
+        if not locked:
+            try:
+                rid = int(request.form.get("region_id", ""))
+                cid = int(request.form.get("constituency_id", ""))
+                wid = int(request.form.get("ward_id", ""))
+            except ValueError:
+                errors.append("Select a county, constituency and ward.")
+            else:
+                r = db.session.get(Region, rid)
+                c = db.session.get(Constituency, cid)
+                w = db.session.get(Ward, wid)
+                if not r or not r.active or r.code == "LEGACY" or not c or not c.active or c.county_id != rid or not w or not w.active or w.constituency_id != cid:
+                    errors.append("Invalid county, constituency or ward hierarchy.")
+        if errors:
+            for e in errors: flash(e, "danger")
+        else:
+            voter.full_name = name
+            if email != voter.email:
+                voter.email = email
+                voter.email_verified = False
+                voter.email_verification_token = secrets.token_urlsafe(48)
+                voter.email_verification_expires_at = datetime.utcnow() + timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE_SECONDS)
+            if not locked:
+                voter.national_id = national_id
+                voter.region_id, voter.constituency_id, voter.ward_id = rid, cid, wid
+            changed = {"name": voter.full_name, "email": voter.email, "national_id": voter.national_id,
+                       "county": voter.region_id, "constituency": voter.constituency_id, "ward": voter.ward_id}
+            fields = [key for key in old if old[key] != changed[key]]
+            if fields:
+                db.session.add(AuditEvent(event_type="VOTER_DETAILS_EDITED", severity="WARNING",
+                                          user_id=current_user().id,
+                                          details=f"voter_id={user_id}; changed_fields={','.join(fields)}; old_area={old['county']}/{old['constituency']}/{old['ward']}; new_area={voter.region_id}/{voter.constituency_id}/{voter.ward_id}"))
+            try:
+                db.session.commit()
+                if "email" in fields:
+                    link = url_for("verify_email", token=voter.email_verification_token, _external=True)
+                    if not send_email_verification_email(voter.email, link):
+                        flash("Email changed but verification email failed; use Resend Verification.", "warning")
+                flash("Voter updated. Ballots and receipts were not modified.", "success")
+                return redirect(url_for("manage_voters"))
+            except IntegrityError:
+                db.session.rollback()
+                flash("Could not save: email or National ID conflicts with another account.", "danger")
+    regions = Region.query.filter(Region.active.is_(True), Region.code != "LEGACY").order_by(Region.name).all()
+    constituencies = Constituency.query.filter_by(county_id=voter.region_id, active=True).order_by(Constituency.name).all()
+    wards = Ward.query.filter_by(constituency_id=voter.constituency_id, active=True).order_by(Ward.name).all()
+    return render_template_string(EDIT_VOTER_HTML, voter=voter, locked=locked,
+                                  regions=regions, constituencies=constituencies, wards=wards)
+
+
 @app.route("/admin/general", methods=["GET"])
 @admin_required
 def general_admin_dashboard():
@@ -3381,7 +3586,7 @@ def general_admin_dashboard():
         </style>
         <section class="ga-hero">
           <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
-            <div><div class="text-uppercase small fw-semibold" style="color:#b9d7f2;letter-spacing:.08em">RC11 · Election Administration</div>
+            <div><div class="text-uppercase small fw-semibold" style="color:#b9d7f2;letter-spacing:.08em">RC12 · Election Administration</div>
               <h1 class="fw-bold mt-1 mb-1">General Administrator Dashboard</h1>
               <p class="mb-0" style="color:#dce9f5">{{ election.title }}</p>
             </div>
