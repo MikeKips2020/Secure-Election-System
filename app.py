@@ -1235,7 +1235,7 @@ window.rc10 = (() => {
       Kenya Secure E-Voting
     </a>
     <div class="d-flex gap-2">
-      <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('results') }}">Audit &amp; Results</a>
+      <a class="btn btn-outline-parchment btn-sm" href="{{ url_for('full_audit_log') }}">Security Audit</a>
       
 {% if session.get('user_id') %}
   {% set nav_user = current_user() %}
@@ -2069,10 +2069,30 @@ bx.addEventListener('change',async()=>{bw.disabled=true;if(!bx.value)return;cons
 
 AUDIT_LOG_HTML = """
 {% extends "base.html" %}{% block content %}
-<div class="card"><div class="card-body p-4"><div class="d-flex justify-content-between"><div><h2>Full Security Audit Log</h2><p class="text-muted">Immutable application audit history. Dashboard Clear View does not delete these records.</p></div><a class="btn btn-outline-secondary align-self-start" href="{{ url_for('admin_dashboard') }}">Back to Admin</a></div>
-<form class="row g-2 mb-3" method="GET"><div class="col-md-4"><input class="form-control" name="event" value="{{ event_filter }}" placeholder="Event type contains..."></div><div class="col-md-3"><select class="form-select" name="severity"><option value="">All severities</option>{% for s in ['INFO','WARNING','ERROR','CRITICAL'] %}<option {% if severity_filter==s %}selected{% endif %}>{{s}}</option>{% endfor %}</select></div><div class="col"><button class="btn btn-primary">Filter</button> <a class="btn btn-outline-secondary" href="{{ url_for('full_audit_log') }}">Reset</a></div></form>
-<div class="table-responsive"><table class="table table-sm"><thead><tr><th>Time</th><th>Event</th><th>Severity</th><th>User ID</th><th>Details</th></tr></thead><tbody>{% for e in events %}<tr><td>{{e.created_at}}</td><td>{{e.event_type}}</td><td>{{e.severity}}</td><td>{{e.user_id or '-'}}</td><td>{{e.details or ''}}</td></tr>{% else %}<tr><td colspan="5">No matching events.</td></tr>{% endfor %}</tbody></table></div>
-</div></div>{% endblock %}
+<style>
+.audit-hero{background:linear-gradient(115deg,#12233d,#234768);color:white;border-radius:14px;padding:1.7rem 2rem;margin-bottom:1.25rem}
+.audit-panel{background:white;border:1px solid #dce5ed;border-radius:12px;padding:1.3rem;margin-bottom:1.1rem}
+.audit-table{--bs-table-striped-bg:#eaf2f9;--bs-table-hover-bg:#dcebf6;border-color:#d5e0eb}
+.audit-table thead th{background:#e0eaf4;color:#12233d;border-bottom:2px solid #a9bfd4;padding:.85rem;white-space:nowrap}
+.audit-table tbody td{padding:.85rem .7rem;border-bottom:1px solid #c8d7e5;vertical-align:middle;overflow-wrap:anywhere}
+.audit-table tbody tr:nth-child(even)>*{background:#eaf2f9}
+.audit-table tbody tr:nth-child(odd)>*{background:#fff}
+.audit-table tbody tr:hover>*{background:#dcebf6}
+.audit-table .audit-detail{min-width:270px;max-width:550px}
+.audit-panel .form-control,.audit-panel .form-select{border-color:#b6c8d9;min-height:42px}
+</style>
+<div class="audit-hero d-flex justify-content-between flex-wrap gap-3 align-items-center">
+ <div><div class="small text-uppercase fw-semibold mb-1" style="letter-spacing:.09em;color:#b9d7f2">RC12 · Security monitoring</div><h2 class="fw-bold mb-1">Full Security Audit Log</h2><p class="mb-0" style="color:#dce9f5">Recorded administrative and security events. Clearing the dashboard view does not delete these records.</p></div>
+ <a class="btn btn-outline-light" href="{{ url_for('admin_dashboard') if current_user().role in ('super_admin','admin') else url_for('general_admin_dashboard') }}">← Back to Dashboard</a>
+</div>
+<div class="audit-panel"><form class="row g-3 align-items-end" method="GET">
+ <div class="col-md-5"><label class="form-label fw-semibold" for="auditEvent">Search events</label><input id="auditEvent" class="form-control" name="event" value="{{ event_filter }}" placeholder="Event type contains..."></div>
+ <div class="col-md-3"><label class="form-label fw-semibold" for="auditSeverity">Severity</label><select id="auditSeverity" class="form-select" name="severity"><option value="">All severities</option>{% for s in ['INFO','WARNING','ERROR','CRITICAL'] %}<option value="{{s}}" {% if severity_filter==s %}selected{% endif %}>{{s}}</option>{% endfor %}</select></div>
+ <div class="col-md-4 d-flex gap-2"><button class="btn btn-primary flex-grow-1" type="submit">Apply filters</button><a class="btn btn-outline-secondary" href="{{ url_for('full_audit_log') }}">Reset</a></div>
+ </form><p class="text-muted small mb-0 mt-3">{{ events|length }} matching events shown.</p></div>
+<div class="table-responsive border rounded-3 bg-white"><table class="table audit-table mb-0"><thead><tr><th>Time (UTC)</th><th>Event</th><th>Severity</th><th>User ID</th><th>Details</th></tr></thead><tbody>
+{% for e in events %}<tr><td class="text-nowrap">{{e.created_at}}</td><td class="fw-semibold">{{e.event_type}}</td><td><span class="badge {{ 'text-bg-danger' if e.severity in ('ERROR','CRITICAL') else 'text-bg-warning' if e.severity=='WARNING' else 'text-bg-info' }}">{{e.severity}}</span></td><td>{{e.user_id if e.user_id is not none else '-'}}</td><td class="audit-detail">{{e.details or ''}}</td></tr>{% else %}<tr><td colspan="5" class="text-center py-4">No matching events.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}
 """
 
 
@@ -2172,7 +2192,10 @@ VOTERS_HTML = """
 .vm-table td{vertical-align:middle}
 .vm-area{max-width:260px;min-width:180px;white-space:normal;font-size:.88rem}
 .vm-email{overflow-wrap:anywhere;max-width:260px}
-.vm-table tbody tr:hover{background:#f6faff}
+.vm-table tbody tr:nth-child(even)>*{background:#eaf2f9}
+.vm-table tbody tr:nth-child(odd)>*{background:#fff}
+.vm-table tbody tr:hover>*{background:#dcebf6}
+.vm-table tbody td{border-bottom:1px solid #c8d7e5}
 .vm-count{font-weight:700;font-variant-numeric:tabular-nums}
 @media(max-width:767px){.vm-hero{padding:18px}.vm-table{font-size:.9rem}}
 </style>
@@ -2636,6 +2659,21 @@ def vote():
             if db.engine.dialect.name == "postgresql":
                 db.session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"),
                                    {"lock_key": 746283119})
+            # RC12.1: serialize ballot writes with voter-profile edits using the
+            # same global transaction lock; re-read the voter and eligibility.
+            db.session.expire(user)
+            db.session.refresh(user)
+            if not user.account_enabled or user.role != ROLE_VOTER or not user.email_verified:
+                db.session.rollback()
+                flash("Your account is no longer eligible to vote.", "danger")
+                return redirect(url_for("voter_dashboard"))
+            allowed_ids = {c.id for c in eligible_contests_for(user)}
+            if any(c.id not in allowed_ids for c, _ in selected):
+                db.session.rollback()
+                log_event("BALLOT_ELIGIBILITY_CHANGED", "WARNING", user.id,
+                          "Electoral eligibility changed before ballot submission")
+                flash("Your electoral eligibility changed. Please review your ballot again.", "warning")
+                return redirect(url_for("vote"))
             # Recheck receipts AFTER acquiring the lock, not only before it.
             # Otherwise two concurrent submissions can both pass the initial check.
             for contest, candidate in selected:
@@ -3494,10 +3532,37 @@ def edit_voter(user_id):
     locked = db.session.query(BallotReceipt.id).filter_by(user_id=user_id).first() is not None or voter.has_voted
     if request.method == "POST":
         validate_csrf()
+        # Match the lock acquired by ballot submission, avoiding a race between
+        # eligibility changes and a simultaneous vote. PostgreSQL only; SQLite
+        # serializes writers and is intended for local demonstrations.
+        if db.engine.dialect.name == "postgresql":
+            db.session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                               {"lock_key": 746283119})
+        db.session.expire(voter)
+        db.session.refresh(voter)
+        locked = (db.session.query(BallotReceipt.id).filter_by(user_id=user_id).first() is not None
+                  or voter.has_voted)
         name = request.form.get("full_name", "").strip()
         email = request.form.get("email", "").strip().lower()
-        national_id = voter.national_id if locked else request.form.get("national_id", "").strip()
+        national_id = request.form.get("national_id", voter.national_id or "").strip()
         errors = []
+        if locked:
+            # Disabled HTML controls are not submitted. However, a forged POST
+            # with changed values must be rejected, not silently ignored.
+            changed_locked = national_id != (voter.national_id or "")
+            for field, old_value in (("region_id", voter.region_id),
+                                     ("constituency_id", voter.constituency_id),
+                                     ("ward_id", voter.ward_id)):
+                if field in request.form and request.form.get(field) != (str(old_value) if old_value is not None else ""):
+                    changed_locked = True
+            if changed_locked:
+                db.session.add(AuditEvent(event_type="LOCKED_VOTER_EDIT_BLOCKED", severity="WARNING",
+                                          user_id=current_user().id,
+                                          details=f"voter_id={user_id}; protected identity/electoral area change rejected"))
+                db.session.commit()
+                flash("Protected voter details cannot be changed after a ballot has been cast.", "danger")
+                return redirect(url_for("edit_voter", user_id=user_id))
+            national_id = voter.national_id
         if not (1 <= len(name) <= 150): errors.append("Full name is required (maximum 150 characters).")
         if not EMAIL_REGEX.fullmatch(email) or len(email) > 150: errors.append("Enter a valid email.")
         if not NATIONAL_ID_REGEX.fullmatch(national_id or ""): errors.append("National ID must be 7–8 digits.")
@@ -3510,7 +3575,7 @@ def edit_voter(user_id):
                 rid = int(request.form.get("region_id", ""))
                 cid = int(request.form.get("constituency_id", ""))
                 wid = int(request.form.get("ward_id", ""))
-            except ValueError:
+            except (ValueError, TypeError):
                 errors.append("Select a county, constituency and ward.")
             else:
                 r = db.session.get(Region, rid)
@@ -3519,6 +3584,7 @@ def edit_voter(user_id):
                 if not r or not r.active or r.code == "LEGACY" or not c or not c.active or c.county_id != rid or not w or not w.active or w.constituency_id != cid:
                     errors.append("Invalid county, constituency or ward hierarchy.")
         if errors:
+            db.session.rollback()
             for e in errors: flash(e, "danger")
         else:
             voter.full_name = name
@@ -3534,9 +3600,13 @@ def edit_voter(user_id):
                        "county": voter.region_id, "constituency": voter.constituency_id, "ward": voter.ward_id}
             fields = [key for key in old if old[key] != changed[key]]
             if fields:
+                # Preserve an audit trail without disclosing names, emails or
+                # National IDs in logs. Geographic IDs are non-secret.
+                geo_changes = ",".join(f"{k}:{old[k]}->{changed[k]}" for k in
+                                       ("county", "constituency", "ward") if k in fields)
                 db.session.add(AuditEvent(event_type="VOTER_DETAILS_EDITED", severity="WARNING",
                                           user_id=current_user().id,
-                                          details=f"voter_id={user_id}; changed_fields={','.join(fields)}; old_area={old['county']}/{old['constituency']}/{old['ward']}; new_area={voter.region_id}/{voter.constituency_id}/{voter.ward_id}"))
+                                          details=f"voter_id={user_id}; changed_fields={','.join(fields)}; geo_changes={geo_changes}; identity_values=redacted"))
             try:
                 db.session.commit()
                 if "email" in fields:
